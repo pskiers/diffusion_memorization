@@ -387,12 +387,13 @@ class LocalStableDiffusionPipeline(StableDiffusionPipeline):
             generator,
             latents,
         )
-
+        D = height * width * num_channels_latents
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7. Denoising loop
         all_token_grads = []
+        all_losses = [] 
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # expand the latents if we are doing classifier free guidance
@@ -465,7 +466,8 @@ class LocalStableDiffusionPipeline(StableDiffusionPipeline):
 
                     token_grads = token_grads.norm(p=2, dim=-1).mean(dim=0).detach()
                     all_token_grads.append(token_grads)
-                    
+                    all_losses.append(-loss.detach())
+
                     with torch.no_grad():
                         noise_pred = (
                             noise_pred_uncond + guidance_scale * noise_pred_text
@@ -480,7 +482,7 @@ class LocalStableDiffusionPipeline(StableDiffusionPipeline):
 
                     if i == max(target_steps):
                         torch.cuda.empty_cache()
-                        return torch.mean(torch.stack(all_token_grads), dim=0)
+                        return torch.mean(torch.stack(all_token_grads), dim=0), torch.mean(torch.stack(all_losses), dim=0)
                     # delete unused variables
                     del loss, token_grads, noise_pred, noise_pred_uncond, noise_pred_text
                 else:
