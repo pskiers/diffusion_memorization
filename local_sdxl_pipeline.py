@@ -216,6 +216,7 @@ class LocalStableDiffusionXLPipeline(StableDiffusionXLPipeline):
                     )
                     flipd = - torch.sqrt(1 - alpha_bar.to(flipd_trace_term.device)) * flipd_trace_term + flipd_score_norm_term # (+ D) but doesn't matter
                     loss = -flipd.mean()
+                    torch.cuda.empty_cache()
                     (token_grads,) = torch.autograd.grad(loss, [prompt_embeds])
 
                     token_grads = token_grads.norm(p=2, dim=-1).mean(dim=0).detach()

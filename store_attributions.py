@@ -3,6 +3,7 @@ This script stores all the caption attributions in a json file in outputs/attrib
 """
 import json
 import os
+import importlib
 
 import torch
 from diffusers import DDIMScheduler
@@ -10,8 +11,8 @@ import json
 import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig
+from accelerate import dispatch_model
 
-from local_sd_pipeline import LocalStableDiffusionPipeline
 from optim_utils import *
 
 
@@ -20,7 +21,7 @@ with open('match_verbatim_captions.json') as f:
     
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="store_attributions")
+@hydra.main(version_base=None, config_path="configs", config_name="store_attributions_sdxl")
 def main(cfg: DictConfig):
     
     cfg = instantiate(cfg)
@@ -42,17 +43,29 @@ def main(cfg: DictConfig):
 
     # ---------------------- #
     # (2) setup model
+    # Import model class
+    module_path, class_name = cfg.model.model_class.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    ModelClass = getattr(module, class_name)
     # setup the model with the local diffusers pipeline
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    pipe = LocalStableDiffusionPipeline.from_pretrained(
+    pipe = ModelClass.from_pretrained(
         cfg.model.model_id,
         torch_dtype=torch.float16,
         safety_checker=None,
         requires_safety_checker=False,
         cache_dir="../model_cache",
+        device_map=cfg.model.device_map,
     )
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-    pipe = pipe.to(device)
+    if cfg.lora_path is not None:
+        print(f"Loading LoRA weights from {cfg.lora_path}")
+        pipe.load_lora_weights(cfg.lora_path)
+        pipe.unet = dispatch_model(pipe.unet, device_map=cfg.model.device_map)
+        pipe.text_encoder = dispatch_model(pipe.text_encoder, device_map=cfg.model.device_map)
+        pipe.vae = dispatch_model(pipe.vae, device_map=cfg.model.device_map)
+    if cfg.model.device_map is None:
+        device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+        pipe = pipe.to(device)
 
     # ---------------------- #
     # (3) iterate over all the captions and find attributions

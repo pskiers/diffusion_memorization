@@ -6,10 +6,14 @@ out_dir: ./outputs
 name: sd1.4_original
 seed: 0
 
+lora_path: null
+
 model:
+  model_class: local_sd_pipeline.LocalStableDiffusionPipeline
   model_id: CompVis/stable-diffusion-v1-4
   guidance_scale: 7.5
   image_size: 512
+  device_map: null
 
 # the captions to be considered
 mem_captions_path: ./match_verbatim_captions.json
