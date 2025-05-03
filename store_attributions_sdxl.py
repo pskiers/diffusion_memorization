@@ -11,7 +11,7 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
-from local_sd_pipeline import LocalStableDiffusionPipeline
+from local_sdxl_pipeline import LocalStableDiffusionXLPipeline
 from optim_utils import *
 
 
@@ -20,7 +20,7 @@ with open('match_verbatim_captions.json') as f:
     
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="store_attributions")
+@hydra.main(version_base=None, config_path="configs", config_name="store_attributions_sdxl")
 def main(cfg: DictConfig):
     
     cfg = instantiate(cfg)
@@ -43,16 +43,37 @@ def main(cfg: DictConfig):
     # ---------------------- #
     # (2) setup model
     # setup the model with the local diffusers pipeline
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    pipe = LocalStableDiffusionPipeline.from_pretrained(
+    device_map = {
+        # text encoder
+        "text_model": 3,
+
+        # VAE
+        "encoder": 3,
+        "decoder": 3,
+        "quant_conv": 3,
+        "post_quant_conv": 3,
+
+        # UNet
+        "text_projection": 0,
+        "add_embedding": 0,
+        "time_embedding": 0,
+
+        "conv_in": 0,
+
+        "down_blocks": 1,
+        "mid_block": 0,
+        "up_blocks": 2,
+
+        "conv_norm_out": 0,
+        "conv_out": 0,
+    }
+    pipe = LocalStableDiffusionXLPipeline.from_pretrained(
         cfg.model.model_id,
         torch_dtype=torch.float16,
-        safety_checker=None,
-        requires_safety_checker=False,
         cache_dir="../model_cache",
+        device_map=device_map,
     )
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-    pipe = pipe.to(device)
 
     # ---------------------- #
     # (3) iterate over all the captions and find attributions

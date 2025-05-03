@@ -3,15 +3,15 @@ defaults:
   - _self_
 
 out_dir: ./outputs
-name: sd1.4_original
+name: sdxl_original
 seed: 0
 
 model:
-  model_id: CompVis/stable-diffusion-v1-4
+  model_id: stabilityai/stable-diffusion-xl-base-1.0
   guidance_scale: 7.5
   image_size: 512
 
 # the captions to be considered
 mem_captions_path: ./match_verbatim_captions.json
 prompt_start_idx: 0
-prompt_end_idx: 1500 # no limits
+prompt_end_idx: 250 # no limits
