@@ -10,7 +10,7 @@ from diffusers import DDIMScheduler
 import json
 import hydra
 from hydra.utils import instantiate
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from accelerate import dispatch_model
 
 from optim_utils import *
@@ -18,12 +18,12 @@ from optim_utils import *
 
 with open('match_verbatim_captions.json') as f:
     all_mem_captions = json.load(f)
-    
+
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="store_attributions_sdxl")
 def main(cfg: DictConfig):
-    
+
     cfg = instantiate(cfg)
 
     # ---------------------- #
@@ -54,15 +54,37 @@ def main(cfg: DictConfig):
         safety_checker=None,
         requires_safety_checker=False,
         cache_dir="../model_cache",
-        device_map=cfg.model.device_map,
+        # device_map=cfg.model.device_map,
     )
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    # pipe.enable_sequential_cpu_offload()
     if cfg.lora_path is not None:
         print(f"Loading LoRA weights from {cfg.lora_path}")
         pipe.load_lora_weights(cfg.lora_path)
-        pipe.unet = dispatch_model(pipe.unet, device_map=cfg.model.device_map)
-        pipe.text_encoder = dispatch_model(pipe.text_encoder, device_map=cfg.model.device_map)
-        pipe.vae = dispatch_model(pipe.vae, device_map=cfg.model.device_map)
+        pipe.fuse_lora()
+    def print_module_devices(model, max_depth: int = None):
+        for name, module in model.named_modules():
+            # Compute depth based on number of dots in name
+            depth = name.count(".")
+            if max_depth is not None and depth > max_depth:
+                continue
+
+            # Get device(s)
+            devices = {p.device for p in module.parameters(recurse=False)}
+            if not devices:
+                devices = {b.device for b in module.buffers(recurse=False)}
+            device_str = ', '.join(str(d) for d in devices) if devices else "No tensors"
+
+            print(f"{name or 'model'} (depth {depth}): {device_str}")
+    pipe.unet = dispatch_model(pipe.unet, device_map=cfg.model.device_map)
+    pipe.text_encoder = dispatch_model(pipe.text_encoder, device_map=cfg.model.device_map)
+    pipe.text_encoder_2 = dispatch_model(pipe.text_encoder_2, device_map=cfg.model.device_map)
+    pipe.vae = dispatch_model(pipe.vae, device_map=cfg.model.device_map)
+    # print_module_devices(pipe.vae, max_depth=1)
+    # print_module_devices(pipe.text_encoder, max_depth=1)
+    # print_module_devices(pipe.text_encoder_2, max_depth=1)
+    # print_module_devices(pipe.unet, max_depth=1)
+    # raise ValueError()
     if cfg.model.device_map is None:
         device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
         pipe = pipe.to(device)
@@ -103,7 +125,7 @@ def main(cfg: DictConfig):
         # save the attributions
         with open(attribution_path, 'w') as f:
             json.dump(attributions, f, indent=4)
-            
+
 
 if __name__ == "__main__":
     main()

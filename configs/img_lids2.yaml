@@ -3,15 +3,15 @@ defaults:
   - _self_
 
 out_dir: ./outputs
-name: sdxl_turbo_original_concepts
+name: fake-10-seeds-lid-estimates-sdxl-conditional-ai-prompts-0.05
 seed: 0
 
 lora_path: null # ../diffusers/examples/dreambooth/lora-trained-xl-prior_preservation/pytorch_lora_weights.safetensors
 
 model:
   model_class: local_sdxl_pipeline.LocalStableDiffusionXLPipeline
-  model_id: stabilityai/sdxl-turbo # stabilityai/stable-diffusion-xl-base-1.0
-  num_inference_steps: 50
+  model_id: stabilityai/stable-diffusion-xl-base-1.0 # stabilityai/sdxl-turbo
+  num_inference_steps: 4
   guidance_scale: 7.5
   image_size: 512
   device_map:
@@ -41,7 +41,8 @@ model:
     "conv_norm_out": 0
     "conv_out": 0
 
-# the captions to be considered
-mem_captions_path: ./custom_captions.json
+conditional: true
+dataset_path: /net/scratch/hscra/plgrid/plgpawel269/LID-project/data/sdxl_samples_many_ai_sdxl_jpg
+caption_file: samples.json
 prompt_start_idx: 0
 prompt_end_idx: 1000 # no limits

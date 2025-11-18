@@ -3,17 +3,17 @@ defaults:
   - _self_
 
 out_dir: ./outputs
-name: sdxl_turbo_original_concepts
+name: laion-lid-estimates-sd-upscaler-conditional-ai-0.05
 seed: 0
 
 lora_path: null # ../diffusers/examples/dreambooth/lora-trained-xl-prior_preservation/pytorch_lora_weights.safetensors
 
 model:
-  model_class: local_sdxl_pipeline.LocalStableDiffusionXLPipeline
-  model_id: stabilityai/sdxl-turbo # stabilityai/stable-diffusion-xl-base-1.0
-  num_inference_steps: 50
-  guidance_scale: 7.5
-  image_size: 512
+  model_class: local_deepfloyd_if_pipeline.LocalStableDiffusionUpscalePipeline
+  model_id: stabilityai/stable-diffusion-x4-upscaler # stabilityai/sdxl-turbo
+  # num_inference_steps: 4
+  guidance_scale: 9.0
+  # image_size: 512
   device_map:
     # text encoder
     "text_model": 3
@@ -41,7 +41,10 @@ model:
     "conv_norm_out": 0
     "conv_out": 0
 
-# the captions to be considered
-mem_captions_path: ./custom_captions.json
+    "class_embedding": 0
+
+conditional: true
+dataset_path: /net/scratch/hscra/plgrid/plgpawel269/LID-project/data/laion-2b-1024x1024
+caption_file: captions_ai.json
 prompt_start_idx: 0
 prompt_end_idx: 1000 # no limits
