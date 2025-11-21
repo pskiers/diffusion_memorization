@@ -10,6 +10,8 @@ lora_path: null # ../diffusers/examples/dreambooth/lora-trained-xl-prior_preserv
 model:
   model_class: local_sdxl_pipeline.LocalStableDiffusionXLPipeline
   model_id: stabilityai/stable-diffusion-xl-base-1.0 # stabilityai/sdxl-turbo
+  width: 1024
+  height: 1024
   num_inference_steps: 50
   guidance_scale: 7.5
   device_map:
@@ -48,4 +50,6 @@ method: "latent"
 remove_common: true
 remove_significant_directions: false
 randomize_pairs: false
-max_pairs: 2048
+max_pairs: 30000
+shard_size: 2000
+batch_size: 4

@@ -2,6 +2,7 @@ import os
 import importlib
 import itertools
 import random
+import json
 
 import hydra
 from hydra.utils import instantiate
@@ -15,6 +16,7 @@ from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
 from optim_utils import *
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 class ProcessorGradientFlow():
@@ -33,12 +35,14 @@ class ProcessorGradientFlow():
         )
         self.resize = torchvision.transforms.Resize(224)
         self.center_crop = torchvision.transforms.CenterCrop(224)
+
     def preprocess_img(self, images):
         images = self.center_crop(images)
         images = self.resize(images)
         images = self.center_crop(images)
         images = self.normalize(images)
         return images
+
     def __call__(self, images=[], **kwargs):
         processed_inputs = self.processor(images=images, **kwargs)
         processed_inputs["pixel_values"] = self.preprocess_img(images)
@@ -125,31 +129,35 @@ class SubspaceGetter:
                     if not os.path.exists(timestep_dir):
                         os.makedirs(timestep_dir, exist_ok=True)
                         continue
-                    for fname in os.listdir(timestep_dir):
-                        if "_to_" in fname:
-                            if fname.endswith(".npy"):
-                                fname = fname[:-4]
-                            name1, name2 = fname.split("_to_")
-                            name2 = name2  # already split
-                            if name1 not in grad_dict[timestep]:
-                                grad_dict[timestep][name1] = []
-                            grad_dict[timestep][name1].append(name2)
+                    with open(os.path.join(timestep_dir, "shards", "dataset_info.json"), "r") as f:
+                        dataset_info = json.load(f)
+                    for shard in dataset_info["shards"]:
+                        for src_dst in shard:
+                            src, dst = src_dst[0], src_dst[1]
+                            if src not in grad_dict[timestep]:
+                                grad_dict[timestep][src] = []
+                            grad_dict[timestep][src].append(dst)
             return grad_dict
         else:
             os.makedirs(grads_dir, exist_ok=True)
             for timestep in self.timesteps:
                 timestep_dir = os.path.join(grads_dir, f"t{timestep}")
                 os.makedirs(timestep_dir, exist_ok=True)
+                os.makedirs(os.path.join(timestep_dir, "shards"), exist_ok=True)
+                with open(os.path.join(timestep_dir, "dataset_info.json"), "w") as f:
+                    json.dump(
+                        {"shard_size": self.cfg.shard_size, "total": 0, "total_shards": 0, "shards": []}, f
+                    )
+
             # Save hydra config to config.yaml
             with open(config_path, "w") as f:
                 f.write(OmegaConf.to_yaml(self.cfg))
             return {t: {} for t in self.timesteps}
 
-    def encode_image(self, img):
+    def encode_image(self, img, height=1024, width=1024):
         with torch.no_grad():
-            # img_low_res = img.resize((256, 256))
-            img = self.pipe.image_processor.preprocess(img, width=1024, height=1024).to(dtype=self.pipe.vae.dtype)
-            # img = self.pipe.image_processor.preprocess(img).to(dtype=pipe.vae.dtype)
+            img = self.pipe.image_processor.preprocess(img, width=width, height=height).to(dtype=self.pipe.vae.dtype)
+
             latent = self.pipe.vae.encode(img).latent_dist.sample()
             latent = latent * self.pipe.vae.config.scaling_factor
             latent = latent.to(dtype=torch.float16)
@@ -160,7 +168,7 @@ class SubspaceGetter:
         noise = torch.randn_like(latent)
         return self.pipe.scheduler.add_noise(latent, noise, t_noise).detach()
 
-    def do_svd(self):
+    def do_svd(self, threshold=1e-3):
         subspace_sizes = {t: 0 for t in self.timesteps}
         for t in self.timesteps:
             grads_dir = os.path.join(self.out_dir, self.name, "grads", f"t{t}")
@@ -172,17 +180,10 @@ class SubspaceGetter:
                 grads.append(grad.flatten())
 
             grad_matrix = np.stack(grads, axis=0).astype(np.float32)
-            print(grad_matrix.shape)
             u, s, vh = np.linalg.svd(grad_matrix, full_matrices=False)
 
-            # Filter out small singular values (eigenvalues)
-            threshold = 1e-3  # You can adjust this threshold
-            import matplotlib.pyplot as plt
-
-            # Sort eigenvalues from biggest to smallest
             sorted_s = np.sort(s)[::-1]
 
-            # Plot
             plt.figure(figsize=(10, 6))
             plt.bar(range(len(sorted_s)), sorted_s)
             plt.xlabel("Eigenvalue Index")
@@ -190,7 +191,6 @@ class SubspaceGetter:
             plt.title(f"Eigenvalues for timestep {t}")
             plt.tight_layout()
 
-            # Save plot
             eigvals_plot_path = os.path.join(self.out_dir, self.name, f"eigvals_t{t}_barplot.png")
             plt.savefig(eigvals_plot_path)
             plt.close()
@@ -242,86 +242,57 @@ class SubspaceGetter:
 
         num_vect, vect_dim = token_grads.shape
 
-        # --- 1. Perform PCA ---
+        centered_data = token_grads - token_grads.mean(dim=0, keepdim=True)  # center the data
 
-        # For PCA, data should be centered (mean of 0)
-        # Note: Use keepdim=True for proper broadcasting
-        centered_data = token_grads - token_grads.mean(dim=0, keepdim=True)
-
-        # Handle the "N < D" case by computing covariance on the (N, N) matrix
-        # This is much faster and mathematically equivalent for this scenario.
-        if num_vect < vect_dim:
+        if num_vect < vect_dim:  # handle the "N < D" case
             # C_small = (1/(N-1)) * X_centered @ X_centered.T   (shape N, N)
             covariance_matrix_small = (1.0 / (num_vect - 1)) * (centered_data @ centered_data.T)
 
-            # Get eigenvalues and eigenvectors of the (N, N) matrix
             eigenvalues, eigenvectors_small = torch.linalg.eigh(covariance_matrix_small)
-
-            # Sort eigenvalues in descending order
             sorted_indices = torch.argsort(eigenvalues, descending=True)
             sorted_eigenvalues = eigenvalues[sorted_indices]
 
-            # Convert eigenvectors from (N, N) to (D, N)
-            # eigenvector_D = (1 / sqrt(eigenvalue * (N-1))) * X_centered.T @ eigenvector_N
-            # We only care about non-zero eigenvalues
             valid_indices = sorted_indices[sorted_eigenvalues > 1e-9]
             valid_eigenvalues = sorted_eigenvalues[valid_indices]
             valid_eigenvectors_small = eigenvectors_small[:, valid_indices]
 
-            # Calculate the (D, k) eigenvectors
             scale_factors = (1.0 / torch.sqrt(valid_eigenvalues * (num_vect - 1)))
-            # X_centered.T is (D, N), valid_eigenvectors_small is (N, k)
-            # scale_factors must be broadcast from (k,) to (1, k)
             sorted_eigenvectors = centered_data.T @ valid_eigenvectors_small * scale_factors.unsqueeze(0)
             sorted_eigenvalues = valid_eigenvalues
 
-            # Also need the full (D, D) covariance matrix for cross-analysis
-            # This is the only slow part, but necessary for the user's request.
             covariance_matrix = (1.0 / (num_vect - 1)) * (centered_data.T @ centered_data)
 
+        # Standard case (N >= D)
         else:
-            # Standard case (N >= D)
             # C = (1/(N-1)) * X_centered.T @ X_centered   (shape D, D)
             covariance_matrix = (1.0 / (num_vect - 1)) * (centered_data.T @ centered_data)
-
-            # Get eigenvalues and eigenvectors of the (D, D) matrix
-            # .eigh is for symmetric matrices (like cov) and is more stable
+            # get eigenvalues and eigenvectors of the (D, D) matrix
             eigenvalues, eigenvectors = torch.linalg.eigh(covariance_matrix)
-
-            # Sort eigenvalues and corresponding eigenvectors in descending order
             sorted_indices = torch.argsort(eigenvalues, descending=True)
             sorted_eigenvalues = eigenvalues[sorted_indices]
-            # Eigenvectors are columns, so we reorder the columns
+            # eigenvectors are columns
             sorted_eigenvectors = eigenvectors[:, sorted_indices]
 
-
-        # --- 2. Calculate Significance ---
         total_variance = torch.sum(sorted_eigenvalues)
-
-        # Avoid division by zero for zero-variance data
         if total_variance == 0:
             return (torch.empty((0, vect_dim)), torch.empty((0,)),
                     total_variance, covariance_matrix)
 
         explained_variances = sorted_eigenvalues / total_variance
 
-        # --- 3. Filter Results ---
         if n_directions is not None:
             num_to_return = min(n_directions, sorted_eigenvectors.shape[1])
             # Eigenvectors are columns (dim, k), transpose to (k, dim)
             top_k_directions = sorted_eigenvectors[:, :num_to_return].T
             top_k_variances = explained_variances[:num_to_return]
             return top_k_directions, top_k_variances, total_variance, covariance_matrix
-
         elif significance_threshold is not None:
             # Create a boolean mask for directions meeting the threshold
             mask = explained_variances > significance_threshold
             filtered_directions = sorted_eigenvectors[:, mask].T
             filtered_variances = explained_variances[mask]
             return filtered_directions, filtered_variances, total_variance, covariance_matrix
-
         else:
-            # Default: return all sorted, non-zero directions
             return sorted_eigenvectors.T, explained_variances, total_variance, covariance_matrix
 
     @staticmethod
@@ -341,24 +312,19 @@ class SubspaceGetter:
         Returns:
             torch.Tensor: The modified vectors with the direction component removed.
         """
-        # 1. Ensure the direction is a unit vector (length 1) for the projection formula.
-        # This makes the calculation robust even if the input direction isn't normalized.
         if torch.linalg.norm(direction) == 0:
-            return vectors # Cannot project onto a zero vector, return original
-        direction_unit = direction / torch.linalg.norm(direction)
+            return vectors
+        direction_unit = direction / torch.linalg.norm(direction)  # normalize to unit length
 
-        # 2. Calculate the projection of the vectors onto the unit direction.
-        # The dot product gives the magnitude of the projection.
-        # For a batch of vectors, matmul `@` efficiently calculates all dot products.
+        # calculate the projection of the vectors onto the direction.
         dot_products = vectors @ direction_unit
 
-        # Reshape dot products to allow broadcasting for the final multiplication
         if vectors.dim() > 1:
             dot_products = dot_products.unsqueeze(-1)
 
         projections = dot_products * direction_unit
 
-        # 3. Subtract the projection from the original vectors.
+        # subtract the projection from the original vectors.
         vectors_after_removal = vectors - projections
 
         return vectors_after_removal
@@ -369,31 +335,70 @@ class SubspaceGetter:
         all_tokes = {self.pipe.tokenizer.decode(curr_token): i for i, curr_token in enumerate(tokens)}
         return all_tokes[token]
 
+    @staticmethod
+    def collated_pair_iterator(data_list, batch_size, shuffle=True):
+        """
+        Yields batches as 4 parallel lists:
+        (imgs_A, names_A, imgs_B, names_B)
+        """
+        n = len(data_list)
+
+        # 1. Generate index pairs (i, j) where i < j
+        idx_pairs = list(itertools.combinations(range(n), 2))
+
+        # 2. Randomize
+        if shuffle:
+            random.shuffle(idx_pairs)
+
+        # 3. Iterate
+        for k in range(0, len(idx_pairs), batch_size):
+            batch_indices = idx_pairs[k : k + batch_size]
+
+            # Initialize the 4 lists for this batch
+            imgs_A, names_A = [], []
+            imgs_B, names_B = [], []
+
+            for i, j in batch_indices:
+                # Unpack the pair from the source list
+                # data_list[i] is (PIL.Image, imgname)
+                img1, name1 = data_list[i]
+                img2, name2 = data_list[j]
+
+                # Append to the 4 separate lists
+                imgs_A.append(img1)
+                names_A.append(name1)
+                imgs_B.append(img2)
+                names_B.append(name2)
+
+            # Yield the 4 lists
+            yield imgs_A, names_A, imgs_B, names_B
+
     def run(self):
         prompt = self.cfg.data.prompt
         token = self.cfg.data.token
 
         images = list(self.image_iterator(self.cfg.data.image_folder))
-        all_index_pairs = list(itertools.product(range(len(images)), range(len(images))))
-        if self.cfg.randomize_pairs:
-            random.shuffle(all_index_pairs)
+        dataset = self.pair_batch_iterator(
+            images, batch_size=self.cfg.batch_size, shuffle=self.cfg.randomize_pairs
+        )
 
         for t in self.timesteps:
             print(f"Processing timestep {t}")
             num_processed = sum(len(v) for v in self.done_grads_dict[t].values())
-            for i, j in all_index_pairs:
-                img, name = images[i]
-                ref_img, ref_name = images[j]
-                if j <= i:
-                    continue
-                if ref_name in self.done_grads_dict[t].get(name, []):
-                    continue
+            shard = np.empty((0, 2048))
+            shard_pairs = []
+            for imgs, names, ref_imgs, ref_names in dataset:
+                for i, (name, ref_name) in enumerate(zip(names, ref_names)):
+                    if ref_name in self.done_grads_dict[t].get(name, []):
+                        imgs.pop(i)
+                        names.pop(i)
+                        ref_imgs.pop(i)
+                        ref_names.pop(i)
+
                 if num_processed > self.cfg.max_pairs:
                     break
 
-                print(f"  Image {name} to {ref_name}\r", end="")
-
-                latent = self.encode_image(img)
+                latent = self.encode_image(imgs, width=self.cfg.model.width, height=self.cfg.model.height)
                 noised_latent = self.noise_image(latent, t)
 
                 denoised_latent, prompt_tokens = self.pipe.get_pred_denoised_image(
@@ -408,7 +413,7 @@ class SubspaceGetter:
 
                 if self.cfg.method == "clip":
                     ref_img = self.pipe.image_processor.preprocess(
-                        ref_img, width=1024, height=1024
+                        ref_img, width=self.cfg.model.width, height=self.cfg.model.height
                     ).to(dtype=self.clip.dtype, device=denoised_latent.device)
                     batch = torch.cat([denoised_latent, ref_img], dim=0)
                     batch = (batch + 1.0) / 2.0
@@ -419,7 +424,12 @@ class SubspaceGetter:
                     denoised_img_feat, ref_img_feat = outputs[:2]
                     loss = F.mse_loss(denoised_img_feat.float(), ref_img_feat.float())
                 elif self.cfg.method == "latent":
-                    loss = F.mse_loss(denoised_latent.float(), self.encode_image(ref_img).float())
+                    loss = F.mse_loss(
+                        denoised_latent.float(),
+                        self.encode_image(
+                            ref_img, width=self.cfg.model.width, height=self.cfg.model.height
+                        ).float()
+                    )
                 else:
                     raise ValueError(f"Unknown method {self.cfg.method}")
 
@@ -433,27 +443,46 @@ class SubspaceGetter:
                     common = real_tokens_grad.mean(dim=0, keepdim=True)
                     real_tokens_grad = real_tokens_grad - common
 
-                directions, _, _, _= self.find_significant_directions(
-                    real_tokens_grad,
-                    significance_threshold=2.5 / min(real_tokens_grad.shape)
-                )
+                # directions, _, _, _= self.find_significant_directions(
+                #     real_tokens_grad,
+                #     significance_threshold=2.5 / min(real_tokens_grad.shape)
+                # )
 
                 token_grad = tokens_grad[:, self.get_token_pos(prompt, token), :]
                 token_grad = token_grad.cpu()
 
-                if self.cfg.remove_significant_directions:
-                    for direction in directions:
-                        token_grad = self.remove_direction(token_grad, direction.to(token_grad.dtype))
+                # if self.cfg.remove_significant_directions:
+                #     for direction in directions:
+                #         token_grad = self.remove_direction(token_grad, direction.to(token_grad.dtype))
 
                 token_grad = token_grad.numpy()
 
-                grad_path = os.path.join(self.out_dir, self.name, "grads", f"t{t}", f"{name}_to_{ref_name}.npy")
-                np.save(grad_path, token_grad)
-                num_processed += 1
+                shard = np.concatenate([shard, token_grad], axis=0)
+                shard_pairs += [[n, rn] for n, rn in zip(names, ref_names)]
+                num_processed += len(token_grad)
+                if shard.shape[0] >= self.cfg.shard_size:
+                    shard_path = os.path.join(
+                        self.out_dir, self.name, "grads", f"t{t}", "shards", f"shard_{num_processed//self.cfg.shard_size}.npy"
+                    )
+                    np.save(shard_path, shard[:self.cfg.shard_size])
+                    shard_info_path = os.path.join(
+                        self.out_dir, self.name, "grads", f"t{t}", "dataset_info.json"
+                    )
+                    with open(shard_info_path, "r") as f:
+                        dataset_info = json.load(f)
+                    dataset_info["shards"].append(shard_pairs[:self.cfg.shard_size])
+                    dataset_info["total"] += self.cfg.shard_size
+                    dataset_info["total_shards"] += 1
+                    with open(shard_info_path, "w") as f:
+                        json.dump(dataset_info, f)
 
-                if name not in self.done_grads_dict[t]:
-                    self.done_grads_dict[t][name] = []
-                self.done_grads_dict[t][name].append(ref_name)
+                    shard = shard[self.cfg.shard_size :, :]
+                    shard_pairs = shard_pairs[self.cfg.shard_size :]
+
+                for name, ref_name in zip(names, ref_names):
+                    if name not in self.done_grads_dict[t]:
+                        self.done_grads_dict[t][name] = []
+                    self.done_grads_dict[t][name].append(ref_name)
 
                 del denoised_latent, prompt_tokens
                 torch.cuda.empty_cache()
@@ -467,340 +496,5 @@ def main(cfg: DictConfig):
     subspace_getter.run()
 
 
-from scipy.linalg import orth
-from numpy.linalg import svd
-
-
-def compare_subspaces_pca(dirA, dirB, prompt, token, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-
-    def load_grads(grads_dir):
-        grad_files = [f for f in os.listdir(grads_dir) if f.endswith(".npy")]
-        grads = []
-        filenames = []
-        for fname in grad_files:
-            grad = np.load(os.path.join(grads_dir, fname))
-            grads.append(grad.flatten())
-            filenames.append(fname)
-        grad_matrix = np.stack(grads, axis=0).astype(np.float32)
-        grad_matrix = torch.from_numpy(grad_matrix)
-        return grad_matrix, filenames
-
-    # Load grads
-    gradsA, filenames1 = load_grads(dirA)
-    gradsB, filenames2 = load_grads(dirB)
-
-    threshold = 2.5 / min(gradsA.shape)
-
-    # PCA
-    D_A, S_A, V_A, C_A = SubspaceGetter.find_significant_directions(gradsA, significance_threshold=threshold)
-    D_B, S_B, V_B, C_B = SubspaceGetter.find_significant_directions(gradsB, significance_threshold=threshold)
-
-    print(f"\nSet A: Found {D_A.shape[0]}, set B: Found {D_B.shape[0]} significant directions.\n")
-
-    # --- 3. Test A in B ---
-    print("--- Testing A's directions in Set B ---")
-    common = []
-    exclusive = []
-    diffs = ""
-    for i, d_a in enumerate(D_A):
-        # d_a has shape (dim,). Need to make it (1, dim) and (dim, 1) for matmul
-        d_a_col = d_a.unsqueeze(1) # (dim, 1)
-        d_a_row = d_a.unsqueeze(0) # (1, dim)
-
-        # Variance = d_a.T @ C_B @ d_a
-        explained_var_in_B = d_a_row @ C_B @ d_a_col
-        significance_in_B = explained_var_in_B / V_B
-
-        # print(f"A's Dir {i} (Original Sig: {S_A[i]:.4f}) -> Sig in B: {significance_in_B.item():.4f}")
-        if significance_in_B > threshold: # Your significance threshold
-            common.append(i)
-            # print("  -> This direction is ALSO significant in Set B.")
-        else:
-            exclusive.append(i)
-            print(f"\t\tA's Dir {i} (Original Sig: {S_A[i]:.4f}) -> Sig in B: {significance_in_B.item():.4f}")
-            diffs += f"SDXL's Dir {i} (Original Sig: {S_A[i]:.4f}) -> Sig in SDXL turbo: {significance_in_B.item():.4f}\n"
-    print(f"\tExclusive directions in A: {len(exclusive)}, Common directions: {len(common)}")
-
-    with open(os.path.join(output_dir, "directions_sdxl.txt"), "w") as f:
-        f.write(str({"all": len(exclusive)+len(common), "exclusive": len(exclusive), "common": len(common)}))
-        f.write("\n")
-        f.write(diffs)
-
-    for i, idx in enumerate(exclusive):
-        if i >= 8:
-            break
-        intervention = D_A[idx]
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_turbo_exclusive_sdxl_to_sdxl_turbo_{i}.png",
-            model_id="stabilityai/sdxl-turbo",
-            num_inference_steps=4,
-            guidance_scale=0.0,
-        )
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_exclusive_sdxl_to_sdxl_turbo_{i}.png",
-            model_id="stabilityai/stable-diffusion-xl-base-1.0",
-            num_inference_steps=50,
-            guidance_scale=7.0,
-        )
-
-    for i, idx in enumerate(common):
-        if i >= 8:
-            break
-        intervention = D_A[idx]
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_turbo_common_sdxl_to_sdxl_turbo_{i}.png",
-            model_id="stabilityai/sdxl-turbo",
-            num_inference_steps=4,
-            guidance_scale=0.0,
-        )
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_common_sdxl_to_sdxl_turbo_{i}.png",
-            model_id="stabilityai/stable-diffusion-xl-base-1.0",
-            num_inference_steps=50,
-            guidance_scale=7.0,
-        )
-
-
-    # --- 4. Test B in A ---
-    print("\n--- Testing B's directions in Set A ---")
-    common = []
-    exclusive = []
-    diffs = ""
-    for j, d_b in enumerate(D_B):
-        d_b_col = d_b.unsqueeze(1)
-        d_b_row = d_b.unsqueeze(0)
-
-        explained_var_in_A = d_b_row @ C_A @ d_b_col
-        significance_in_A = explained_var_in_A / V_A
-
-        # print(f"B's Dir {j} (Original Sig: {S_B[j]:.4f}) -> Sig in A: {significance_in_A.item():.4f}")
-        if significance_in_A > threshold: # Your significance threshold
-            common.append(j)
-            # print("  -> This direction is ALSO significant in Set A.")
-        else:
-            exclusive.append(j)
-            print(f"\t\tB's Dir {j} (Original Sig: {S_B[j]:.4f}) -> Sig in A: {significance_in_A.item():.4f}")
-            diffs += f"SDXL turbo's Dir {j} (Original Sig: {S_B[j]:.4f}) -> Sig in SDXL: {significance_in_A.item():.4f}\n"
-    print(f"\tExclusive directions in B: {len(exclusive)}, Common directions: {len(common)}")
-
-    with open(os.path.join(output_dir, "directions_sdxl_turbo.txt"), "w") as f:
-        f.write(str({"all": len(exclusive)+len(common), "exclusive": len(exclusive), "common": len(common)}))
-        f.write("\n")
-        f.write(diffs)
-
-    for i, idx in enumerate(exclusive):
-        if i >= 8:
-            break
-        intervention = D_B[idx]
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_turbo_exclusive_sdxl_turbo_to_sdxl_{i}.png",
-            model_id="stabilityai/sdxl-turbo",
-            num_inference_steps=4,
-            guidance_scale=0.0,
-        )
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_exclusive_sdxl_turbo_to_sdxl_{i}.png",
-            model_id="stabilityai/stable-diffusion-xl-base-1.0",
-            num_inference_steps=50,
-            guidance_scale=7.0,
-        )
-
-    for i, idx in enumerate(common):
-        if i >= 8:
-            break
-        intervention = D_B[idx]
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_turbo_common_sdxl_turbo_to_sdxl_{i}.png",
-            model_id="stabilityai/sdxl-turbo",
-            num_inference_steps=4,
-            guidance_scale=0.0,
-        )
-        experiment_with_tokens(
-            prompt=prompt,
-            token=token,
-            token_intervention=intervention,
-            intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
-            output_path=f"{output_dir}/sdxl_common_sdxl_turbo_to_sdxl_{i}.png",
-            model_id="stabilityai/stable-diffusion-xl-base-1.0",
-            num_inference_steps=50,
-            guidance_scale=7.0,
-        )
-
-
-def compare_subspaces_svd():
-    dir1 = "/net/scratch/hscra/plgrid/plgpawel269/LID-project/diffusion_memorization/outputs/sdxl-frog/grads/t13"
-    dir2 = "/net/scratch/hscra/plgrid/plgpawel269/LID-project/diffusion_memorization/outputs/sdxl-turbo-frog/grads/t1"
-    threshold = 1e-3
-
-    def load_grads(grads_dir):
-        grad_files = [f for f in os.listdir(grads_dir) if f.endswith(".npy")]
-        grads = []
-        filenames = []
-        for fname in grad_files:
-            grad = np.load(os.path.join(grads_dir, fname))
-            grads.append(grad.flatten())
-            filenames.append(fname)
-        grad_matrix = np.stack(grads, axis=0).astype(np.float32)
-        return grad_matrix, filenames
-
-    # Load grads
-    grads1, filenames1 = load_grads(dir1)
-    grads2, filenames2 = load_grads(dir2)
-
-    # SVD
-    u1, s1, vh1 = np.linalg.svd(grads1, full_matrices=False)
-    u2, s2, vh2 = np.linalg.svd(grads2, full_matrices=False)
-
-    # Significant directions
-    sig_idx1 = np.where(s1 > threshold)[0]
-    sig_idx2 = np.where(s2 > threshold)[0]
-    subspace1 = vh1[sig_idx1]
-    subspace2 = vh2[sig_idx2]
-
-    # Orthonormalize
-    subspace1_orth = orth(subspace1.T)
-    subspace2_orth = orth(subspace2.T)
-
-    # Compute intersection
-
-    M = np.dot(subspace1_orth.T, subspace2_orth)
-    _, s, _ = svd(M)
-    common_size = np.sum(s > 1e-2)
-
-    print(f"Common subspace size: {common_size}")
-    print(f"Subspace1 size: {subspace1_orth.shape[1]}")
-    print(f"Subspace2 size: {subspace2_orth.shape[1]}")
-    print(f"Exclusive to subspace1: {subspace1_orth.shape[1] - common_size}")
-    print(f"Exclusive to subspace2: {subspace2_orth.shape[1] - common_size}")
-
-    # Find exclusive directions
-    # Project subspace1_orth onto subspace2_orth and get residuals
-    proj1_on_2 = subspace2_orth @ (subspace2_orth.T @ subspace1_orth)
-    exclusive1 = subspace1_orth - proj1_on_2
-    exclusive1 = orth(exclusive1)
-    np.save("exclusive_to_subspace1.npy", exclusive1)
-
-    proj2_on_1 = subspace1_orth @ (subspace1_orth.T @ subspace2_orth)
-    exclusive2 = subspace2_orth - proj2_on_1
-    exclusive2 = orth(exclusive2)
-    np.save("exclusive_to_subspace2.npy", exclusive2)
-
-    # Project each original vector in grads1 onto the exclusive subspace
-    projections = grads1 @ exclusive1
-    projection_magnitudes = np.linalg.norm(projections, axis=1)
-
-    n = 5
-    top_n_idx = np.argpartition(-projection_magnitudes, n-1)[:n]
-    top_n_idx = top_n_idx[np.argsort(-projection_magnitudes[top_n_idx])]
-    # print filenames and magnitudes for the top-n
-    for idx in top_n_idx:
-        print(f"{filenames1[idx]}: {projection_magnitudes[idx]}")
-    most_exclusive_idx = np.argmax(projection_magnitudes)
-    most_exclusive_vector = grads1[most_exclusive_idx]
-    np.save("most_exclusive_vector.npy", most_exclusive_vector)
-
-    print(f"{filenames1[most_exclusive_idx]}, {most_exclusive_vector}")
-
-def experiment_with_tokens(
-    prompt,
-    token,
-    token_intervention,
-    intervention_strenghts=[0, 500, 1000, 5000, 10000, 15000],
-    output_path="token_intervention_experiment.png",
-    seed=42,
-    num_per=10,
-    model_id="stabilityai/stable-diffusion-xl-base-1.0",
-    num_inference_steps=50,
-    guidance_scale=7.0,
-):
-    from local_sdxl_pipeline import LocalStableDiffusionXLPipeline
-
-    set_random_seed(seed)
-    pipe = LocalStableDiffusionXLPipeline.from_pretrained(
-        # "stabilityai/stable-diffusion-xl-base-1.0",
-        # "stabilityai/sdxl-turbo",
-        model_id,
-        torch_dtype=torch.float16,
-        safety_checker=None,
-        requires_safety_checker=False,
-        cache_dir="../model_cache",
-    )
-    pipe = pipe.to("cuda")
-    tokens = pipe.tokenizer.encode(prompt)
-    tokens = tokens[:77]
-    all_tokes = {pipe.tokenizer.decode(curr_token): i for i, curr_token in enumerate(tokens)}
-    pos = all_tokes[token]
-
-    rows = []
-    for intervention in intervention_strenghts:
-        set_random_seed(seed)
-        result = pipe(
-            prompt,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            intervention=intervention,
-            num_images_per_prompt=num_per,
-            token_intervention=token_intervention,
-            token_intervention_pos=pos,
-            intervention_strenght=intervention,
-        )
-        imgs_row = [im.convert("RGB") for im in result.images]  # ensure consistent mode
-        rows.append(imgs_row)
-
-    # build grid where each row is one intervention and each column is an image from that run
-    cols = num_per
-    single_w, single_h = rows[0][0].size
-    grid_w = cols * single_w
-    grid_h = len(rows) * single_h
-
-    grid = Image.new("RGB", (grid_w, grid_h))
-    for r, imgs_row in enumerate(rows):
-        for c, im in enumerate(imgs_row):
-            grid.paste(im, (c * single_w, r * single_h))
-
-    img = grid
-
-    # img = pipe(
-    #     "A cartoonish scene of the inside of a subway train. There are anthropomorphic frogs with big bear-like ears sitting on the seats. One of them is reading a newspaper. The window shows the river in the background.",
-    #     num_inference_steps=4,
-    #     guidance_scale=0.0,
-    #     intervention=0,
-    #     num_images_per_prompt=1
-    # ).images[0]
-    img.save(output_path)
-
-
 if __name__ == "__main__":
     main()
-    # compare_subspaces_svd()
-    # compare_subspaces_pca()
-    # experiment_with_tokens()
