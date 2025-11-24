@@ -3,6 +3,7 @@ import importlib
 import itertools
 import random
 import json
+import time
 
 import hydra
 from hydra.utils import instantiate
@@ -129,7 +130,7 @@ class SubspaceGetter:
                     if not os.path.exists(timestep_dir):
                         os.makedirs(timestep_dir, exist_ok=True)
                         continue
-                    with open(os.path.join(timestep_dir, "shards", "dataset_info.json"), "r") as f:
+                    with open(os.path.join(timestep_dir, "dataset_info.json"), "r") as f:
                         dataset_info = json.load(f)
                     for shard in dataset_info["shards"]:
                         for src_dst in shard:
@@ -146,7 +147,9 @@ class SubspaceGetter:
                 os.makedirs(os.path.join(timestep_dir, "shards"), exist_ok=True)
                 with open(os.path.join(timestep_dir, "dataset_info.json"), "w") as f:
                     json.dump(
-                        {"shard_size": self.cfg.shard_size, "total": 0, "total_shards": 0, "shards": []}, f
+                        {"shard_size": self.cfg.shard_size, "total": 0, "total_shards": 0, "shards": []},
+                        f,
+                        indent=4,
                     )
 
             # Save hydra config to config.yaml
@@ -378,7 +381,7 @@ class SubspaceGetter:
         token = self.cfg.data.token
 
         images = list(self.image_iterator(self.cfg.data.image_folder))
-        dataset = self.pair_batch_iterator(
+        dataset = self.collated_pair_iterator(
             images, batch_size=self.cfg.batch_size, shuffle=self.cfg.randomize_pairs
         )
 
@@ -387,6 +390,8 @@ class SubspaceGetter:
             num_processed = sum(len(v) for v in self.done_grads_dict[t].values())
             shard = np.empty((0, 2048))
             shard_pairs = []
+
+            start_time = time.time()
             for imgs, names, ref_imgs, ref_names in dataset:
                 for i, (name, ref_name) in enumerate(zip(names, ref_names)):
                     if ref_name in self.done_grads_dict[t].get(name, []):
@@ -402,7 +407,7 @@ class SubspaceGetter:
                 noised_latent = self.noise_image(latent, t)
 
                 denoised_latent, prompt_tokens = self.pipe.get_pred_denoised_image(
-                    prompt,
+                    [prompt] * len(noised_latent),
                     latents=noised_latent,
                     num_inference_steps=self.cfg.model.num_inference_steps,
                     guidance_scale=self.cfg.model.guidance_scale,
@@ -412,10 +417,10 @@ class SubspaceGetter:
                 )
 
                 if self.cfg.method == "clip":
-                    ref_img = self.pipe.image_processor.preprocess(
-                        ref_img, width=self.cfg.model.width, height=self.cfg.model.height
+                    ref_imgs = self.pipe.image_processor.preprocess(
+                        ref_imgs, width=self.cfg.model.width, height=self.cfg.model.height
                     ).to(dtype=self.clip.dtype, device=denoised_latent.device)
-                    batch = torch.cat([denoised_latent, ref_img], dim=0)
+                    batch = torch.cat([denoised_latent, ref_imgs], dim=0)
                     batch = (batch + 1.0) / 2.0
                     inputs = self.clip_image_processor(
                         images=batch, return_tensors="pt"
@@ -427,7 +432,7 @@ class SubspaceGetter:
                     loss = F.mse_loss(
                         denoised_latent.float(),
                         self.encode_image(
-                            ref_img, width=self.cfg.model.width, height=self.cfg.model.height
+                            ref_imgs, width=self.cfg.model.width, height=self.cfg.model.height
                         ).float()
                     )
                 else:
@@ -436,11 +441,11 @@ class SubspaceGetter:
                 tokens_grad = torch.autograd.grad(loss, [prompt_tokens], allow_unused=True)[0]
 
                 real_tokens_grad = tokens_grad[
-                    0, :len(self.pipe.tokenizer.encode(prompt))
+                    :, :len(self.pipe.tokenizer.encode(prompt))
                 ].to(torch.float).cpu()
 
                 if self.cfg.remove_common:
-                    common = real_tokens_grad.mean(dim=0, keepdim=True)
+                    common = real_tokens_grad.mean(dim=1, keepdim=True)
                     real_tokens_grad = real_tokens_grad - common
 
                 # directions, _, _, _= self.find_significant_directions(
@@ -474,7 +479,7 @@ class SubspaceGetter:
                     dataset_info["total"] += self.cfg.shard_size
                     dataset_info["total_shards"] += 1
                     with open(shard_info_path, "w") as f:
-                        json.dump(dataset_info, f)
+                        json.dump(dataset_info, f, indent=4)
 
                     shard = shard[self.cfg.shard_size :, :]
                     shard_pairs = shard_pairs[self.cfg.shard_size :]
@@ -486,7 +491,20 @@ class SubspaceGetter:
 
                 del denoised_latent, prompt_tokens
                 torch.cuda.empty_cache()
+
+                elapsed_sec = time.time() - start_time
+                expected_total_sec = (elapsed_sec / num_processed) * self.cfg.max_pairs
+                print(
+                    f"Grads gathered: {num_processed}/{self.cfg.max_pairs} \t Time {format_time(elapsed_sec)}/{format_time(expected_total_sec)}\r"
+                )
         self.do_svd()
+
+
+def format_time(seconds):
+    """Converts seconds to hh:mm:ss string."""
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="token_subspace")

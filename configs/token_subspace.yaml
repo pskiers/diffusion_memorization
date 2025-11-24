@@ -52,4 +52,4 @@ remove_significant_directions: false
 randomize_pairs: false
 max_pairs: 30000
 shard_size: 2000
-batch_size: 4
+batch_size: 16
