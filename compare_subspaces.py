@@ -6,6 +6,7 @@ import torch
 from PIL import Image
 from optim_utils import *
 import numpy as np
+import matplotlib.pyplot as plt
 from safetensors.torch import load_file
 
 from token_subspace import SubspaceGetter
@@ -57,6 +58,17 @@ class Comparator:
             f.write("\n")
             f.write(diffs)
 
+    @staticmethod
+    def make_variance_barplot(variances, outpath):
+        vars_np = variances.detach().cpu().numpy() if hasattr(variances, "detach") else np.asarray(variances)
+        plt.figure(figsize=(max(6, len(vars_np) * 0.2), 4))
+        plt.bar(np.arange(len(vars_np)), vars_np, color="tab:blue")
+        plt.xlabel("Principal component")
+        plt.ylabel("Variance")
+        plt.tight_layout()
+        plt.savefig(outpath, dpi=200)
+        plt.close()
+
     def run(
         self,
         datasets,
@@ -90,12 +102,14 @@ class Comparator:
         }
         for k, v in pca_dict.items():
             print(f"\nSet {k}: Found {v[0].shape[0]}")
+        for k, (_, variances, _, _) in pca_dict.items():
+            self.make_variance_barplot(variances, os.path.join(self.output_dir, f"var_barplot_{k}.png"))
 
-        exclusive_matrix = [[[[] for _ in pca_dict.keys()]] for _ in pca_dict.keys()]
+        exclusive_matrix = [[[] for _ in pca_dict.keys()] for _ in pca_dict.keys()]
         directions = []
         for i in pca_dict.keys():
             for j in pca_dict.keys():
-                if i >= j:
+                if i == j:
                     continue
                 print(f"\n--- Comparing Set {i} to Set {j} ---")
                 D_A, S_A, V_A, C_A = pca_dict[i]
@@ -111,10 +125,10 @@ class Comparator:
                     common=common_from_A,
                     significance_list=significance_from_A_in_B,
                     original_significances=S_A,
-                    outpath=os.path.join(self.output_dir, "directions_A.txt"),
+                    outpath=os.path.join(self.output_dir, f"directions_{i}_to_{j}.txt"),
                 )
                 exclusive_matrix[i][j] = exclusive_in_A
-                directions.append(D_A)
+            directions.append(D_A)
 
         return directions, exclusive_matrix
 
@@ -292,13 +306,15 @@ def main(
     ]
 
     exp_dict = dict()
-    for i in range(len(directions)):
+    for i, dirs in enumerate(directions):
         for j in range(len(directions)):
-            exp_dict[f"from_{i}_not_in_{j}"] = [directions[i] for i in exclusive_matrix[i][j]]
+            if i == j:
+                continue
+            exp_dict[f"from_{i}_not_in_{j}"] = [dirs[k] for k in exclusive_matrix[i][j]]
             exp_dict[f"from_{i}_and_in_{j}"] = [
                 dir
-                for i, dir in enumerate(directions)
-                if i not in exclusive_matrix[i][j]
+                for l, dir in enumerate(dirs)
+                if l not in exclusive_matrix[i][j]
             ]
     for i, sae_dirs in enumerate(sae_directions):
         exp_dict[f"sae_dir_{i}"] = sae_dirs
