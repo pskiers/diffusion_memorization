@@ -819,7 +819,10 @@ class LocalStableDiffusionXLPipeline(StableDiffusionXLPipeline):
 
         if "intervention_strenght" in kwargs and "token_intervention" in kwargs and "token_intervention_pos" in kwargs:
             intervention = kwargs["token_intervention"].to(prompt_embeds.device)
-            prompt_embeds[:, kwargs["token_intervention_pos"]] += kwargs["intervention_strenght"] * intervention
+            positions = torch.tensor(kwargs["token_intervention_pos"], device=prompt_embeds.device)
+            strenghts = torch.tensor(kwargs["intervention_strenght"], device=prompt_embeds.device)
+            batch_idx = torch.arange(intervention.shape[0], device=prompt_embeds.device)
+            prompt_embeds[batch_idx, positions] += intervention * strenghts.unsqueeze(dim=1)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -1002,6 +1005,7 @@ class LocalStableDiffusionXLPipeline(StableDiffusionXLPipeline):
             else:
                 latents = latents / self.vae.config.scaling_factor
 
+            latents = latents.to(self.vae.dtype)
             image = self.vae.decode(latents, return_dict=False)[0]
 
             # cast back to fp16 if needed
