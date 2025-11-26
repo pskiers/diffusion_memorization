@@ -42,16 +42,16 @@ class SamplerWithDirections:
             torch_dtype=torch.float16,
             safety_checker=None,
             requires_safety_checker=False,
-            # variant="fp16",
+            variant="fp16",
             cache_dir="../model_cache",
         )
-        pipe.vae = AutoencoderKL.from_pretrained(
-            cfg.model.model_id,
-            subfolder="vae",
-            # variant="fp16",
-            torch_dtype=torch.float32,
-        )
-        pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+        # pipe.vae = AutoencoderKL.from_pretrained(
+        #     cfg.model.model_id,
+        #     subfolder="vae",
+        #     # variant="fp16",
+        #     torch_dtype=torch.float32,
+        # )
+        # pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
         # pipe.enable_sequential_cpu_offload()
         if cfg.model.lora_path is not None:
             print(f"Loading LoRA weights from {cfg.model.lora_path}")

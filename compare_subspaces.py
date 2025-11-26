@@ -176,11 +176,11 @@ class Experimenter:
             imgs_row = []
             for _ in range(self.imgs_per_experiment // self.batch_size):
                 result = model(
-                    prompt,
-                    num_images_per_prompt=self.batch_size,
-                    token_intervention=token_intervention,
-                    token_intervention_pos=self.get_token_position(model, prompt, token),
-                    intervention_strenght=intervention,
+                    [prompt] * self.batch_size,
+                    num_images_per_prompt=1,
+                    token_intervention=torch.stack([token_intervention] * self.batch_size, dim=0),
+                    token_intervention_pos=torch.tensor([self.get_token_position(model, prompt, token)] * self.batch_size),
+                    intervention_strenght=torch.tensor([intervention] * self.batch_size),
                     **kwargs,
                 )
                 gc.collect()
@@ -188,11 +188,11 @@ class Experimenter:
                 imgs_row += [im.convert("RGB") for im in result.images]
             if self.imgs_per_experiment % self.batch_size != 0:
                 result = model(
-                    prompt,
-                    num_images_per_prompt=self.imgs_per_experiment % self.batch_size,
-                    token_intervention=token_intervention,
-                    token_intervention_pos=self.get_token_position(model, prompt, token),
-                    intervention_strenght=intervention,
+                    [prompt] * self.imgs_per_experiment % self.batch_size,
+                    num_images_per_prompt=1,
+                    token_intervention=torch.stack([token_intervention] * self.imgs_per_experiment % self.batch_size, dim=0),
+                    token_intervention_pos=torch.tensor([self.get_token_position(model, prompt, token)] * self.imgs_per_experiment % self.batch_size),
+                    intervention_strenght=torch.tensor([intervention] * self.imgs_per_experiment % self.batch_size),
                     **kwargs,
                 )
                 gc.collect()
@@ -266,6 +266,7 @@ def load_sae_directions(sae_ckpt_path, low=-5, high=0, add_bias=True):
 def get_model(model_id):
     return LocalStableDiffusionXLPipeline.from_pretrained(
         model_id,
+        variant="fp16",
         torch_dtype=torch.float16,
         safety_checker=None,
         requires_safety_checker=False,
@@ -365,14 +366,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     models_dict = dict()
-    models_dict["sdxl"] = get_model("stabilityai/stable-diffusion-xl-base-1.0")
+    # models_dict["sdxl"] = get_model("stabilityai/stable-diffusion-xl-base-1.0")
     models_dict["sdxl_turbo"] = get_model("stabilityai/sdxl-turbo")
 
     call_kwargs = dict()
-    call_kwargs["sdxl"] = dict(
-        num_inference_steps=50,
-        guidance_scale=7.5,
-    )
+    # call_kwargs["sdxl"] = dict(
+    #     num_inference_steps=50,
+    #     guidance_scale=7.5,
+    # )
     call_kwargs["sdxl_turbo"] = dict(
         num_inference_steps=4,
         guidance_scale=0.0,

@@ -1005,7 +1005,7 @@ class LocalStableDiffusionXLPipeline(StableDiffusionXLPipeline):
             else:
                 latents = latents / self.vae.config.scaling_factor
 
-            latents = latents.to(self.vae.dtype)
+            # latents = latents.to(self.vae.dtype)
             image = self.vae.decode(latents, return_dict=False)[0]
 
             # cast back to fp16 if needed
