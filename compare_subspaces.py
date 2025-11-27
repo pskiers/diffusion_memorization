@@ -140,7 +140,7 @@ class Experimenter:
         call_kwargs: dict[str, dict[str, Any]],
         output_dir: str,
         imgs_per_experiment: int = 10,
-        batch_size: int = 5,
+        batch_size: int = 4,
         seed: int = 42,
     ):
         self.models_dict = models_dict
@@ -188,11 +188,11 @@ class Experimenter:
                 imgs_row += [im.convert("RGB") for im in result.images]
             if self.imgs_per_experiment % self.batch_size != 0:
                 result = model(
-                    [prompt] * self.imgs_per_experiment % self.batch_size,
+                    [prompt] * (self.imgs_per_experiment % self.batch_size),
                     num_images_per_prompt=1,
-                    token_intervention=torch.stack([token_intervention] * self.imgs_per_experiment % self.batch_size, dim=0),
-                    token_intervention_pos=torch.tensor([self.get_token_position(model, prompt, token)] * self.imgs_per_experiment % self.batch_size),
-                    intervention_strenght=torch.tensor([intervention] * self.imgs_per_experiment % self.batch_size),
+                    token_intervention=torch.stack([token_intervention] * (self.imgs_per_experiment % self.batch_size), dim=0),
+                    token_intervention_pos=torch.tensor([self.get_token_position(model, prompt, token)] * (self.imgs_per_experiment % self.batch_size)),
+                    intervention_strenght=torch.tensor([intervention] * (self.imgs_per_experiment % self.batch_size)),
                     **kwargs,
                 )
                 gc.collect()
@@ -366,14 +366,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     models_dict = dict()
-    # models_dict["sdxl"] = get_model("stabilityai/stable-diffusion-xl-base-1.0")
+    models_dict["sdxl"] = get_model("stabilityai/stable-diffusion-xl-base-1.0")
     models_dict["sdxl_turbo"] = get_model("stabilityai/sdxl-turbo")
 
     call_kwargs = dict()
-    # call_kwargs["sdxl"] = dict(
-    #     num_inference_steps=50,
-    #     guidance_scale=7.5,
-    # )
+    call_kwargs["sdxl"] = dict(
+        num_inference_steps=50,
+        guidance_scale=7.5,
+    )
     call_kwargs["sdxl_turbo"] = dict(
         num_inference_steps=4,
         guidance_scale=0.0,
