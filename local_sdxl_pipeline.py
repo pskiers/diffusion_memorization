@@ -823,6 +823,13 @@ class LocalStableDiffusionXLPipeline(StableDiffusionXLPipeline):
             strenghts = torch.tensor(kwargs["intervention_strenght"], device=prompt_embeds.device)
             batch_idx = torch.arange(intervention.shape[0], device=prompt_embeds.device)
             prompt_embeds[batch_idx, positions] += intervention * strenghts.unsqueeze(dim=1)
+        # if "interventions" in kwargs:
+        #     for intervention_dict in kwargs["interventions"]:
+        #         intervention = intervention_dict["token_intervention"].to(prompt_embeds.device)
+        #         positions = torch.tensor(intervention_dict["token_intervention_pos"], device=prompt_embeds.device)
+        #         strenghts = torch.tensor(intervention_dict["intervention_strenght"], device=prompt_embeds.device)
+        #         batch_idx = torch.arange(intervention.shape[0], device=prompt_embeds.device)
+        #         prompt_embeds[batch_idx, positions] += intervention * strenghts.unsqueeze(dim=1)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
@@ -920,6 +927,36 @@ class LocalStableDiffusionXLPipeline(StableDiffusionXLPipeline):
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
+
+                # if self.do_classifier_free_guidance:
+                #     neg_prompt, pos_prompt = prompt_embeds.clone().chunk(2)
+                # else:
+                #     raise ValueError()
+                # for intervention_dict in kwargs["interventions"]:
+                #     # m7, c10
+                #     if i > 5:#(intervention_dict["token_intervention_pos"][0] == 7) or (intervention_dict["token_intervention_pos"][0] == 10):
+                #         # print(intervention_dict["token_intervention_pos"],"asdf")
+                #         intervention = intervention_dict["token_intervention"].to(prompt_embeds.device)
+                #         positions = torch.tensor(intervention_dict["token_intervention_pos"], device=prompt_embeds.device)
+                #         strenghts = torch.tensor(intervention_dict["intervention_strenght"], device=prompt_embeds.device)
+                #         batch_idx = torch.arange(intervention.shape[0], device=prompt_embeds.device)
+                #         pos_prompt[batch_idx, positions] += intervention * strenghts.unsqueeze(dim=1)
+                # embeds_changed = torch.cat([neg_prompt, pos_prompt], dim=0)
+                    # import time
+                    # time.sleep(2)
+                # if "intervention_strenght" in kwargs and "token_intervention" in kwargs and "token_intervention_pos" in kwargs:
+                #     intervention = kwargs["token_intervention"][self._num_timesteps - i].to(prompt_embeds.device)
+                #     positions = torch.tensor(kwargs["token_intervention_pos"], device=prompt_embeds.device)
+                #     strenghts = torch.tensor(kwargs["intervention_strenght"][self._num_timesteps - i], device=prompt_embeds.device)
+                #     batch_idx = torch.arange(intervention.shape[0], device=prompt_embeds.device)
+                #     if self.do_classifier_free_guidance:
+                #         neg_prompt, pos_prompt = prompt_embeds.clone().chunk(2)
+                #         pos_prompt[batch_idx, positions] += intervention * strenghts.unsqueeze(dim=1)
+                #         embeds_changed = torch.cat([neg_prompt, pos_prompt], dim=0)
+                #     else:``
+                #         embeds_changed = prompt_embeds[batch_idx, positions] + intervention * strenghts.unsqueeze(dim=1)
+                # else:
+                #     embeds_changed = prompt_embeds
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents

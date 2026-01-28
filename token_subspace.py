@@ -12,7 +12,8 @@ from accelerate import dispatch_model
 import torch
 import torch.nn.functional as F
 import torchvision
-from diffusers import DDIMScheduler, AutoencoderKL
+from diffusers import DDIMScheduler, AutoencoderKL, DiffusionPipeline, UNet2DConditionModel, LCMScheduler
+from huggingface_hub import hf_hub_download
 from transformers import CLIPProcessor, CLIPModel
 from PIL import Image
 from optim_utils import *
@@ -63,23 +64,57 @@ class SubspaceGetter:
         module_path, class_name = cfg.model.model_class.rsplit(".", 1)
         module = importlib.import_module(module_path)
         ModelClass = getattr(module, class_name)
-        # setup the model with the local diffusers pipeline
-        pipe = ModelClass.from_pretrained(
-            cfg.model.model_id,
-            torch_dtype=torch.float16,
-            safety_checker=None,
-            requires_safety_checker=False,
-            # variant="fp16",
-            cache_dir="../model_cache",
-        )
-        pipe.vae = AutoencoderKL.from_pretrained(
-            cfg.model.model_id,
-            subfolder="vae",
-            # variant="fp16",
-            torch_dtype=torch.float32,
-        )
-        pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-        # pipe.enable_sequential_cpu_offload()
+        if cfg.model.model_id != "sdxl-dmd":
+            # setup the model with the local diffusers pipeline
+            pipe = ModelClass.from_pretrained(
+                cfg.model.model_id,
+                torch_dtype=torch.float16,
+                safety_checker=None,
+                requires_safety_checker=False,
+                # variant="fp16",
+                cache_dir="../model_cache",
+            )
+            pipe.vae = AutoencoderKL.from_pretrained(
+                cfg.model.model_id,
+                subfolder="vae",
+                # variant="fp16",
+                torch_dtype=torch.float32,
+            )
+            pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+            # pipe.enable_sequential_cpu_offload()
+        else:
+            base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+            repo_name = "tianweiy/DMD2"
+            ckpt_name = "dmd2_sdxl_4step_unet_fp16.bin"
+            # Load model.
+            unet = UNet2DConditionModel.from_config(
+                base_model_id,
+                subfolder="unet"
+            ).to(torch.float16)
+            unet.load_state_dict(
+                torch.load(
+                    hf_hub_download(
+                        repo_name,
+                        ckpt_name,
+                        cache_dir="../model_cache"
+                    )
+                )
+            )
+            pipe = ModelClass.from_pretrained(
+                base_model_id,
+                unet=unet,
+                torch_dtype=torch.float16,
+                variant="fp16",
+                cache_dir="../model_cache"
+            )
+            pipe.vae = AutoencoderKL.from_pretrained(
+                base_model_id,
+                subfolder="vae",
+                # variant="fp16",
+                torch_dtype=torch.float32,
+            )
+            pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+
         if cfg.lora_path is not None:
             print(f"Loading LoRA weights from {cfg.lora_path}")
             pipe.load_lora_weights(cfg.lora_path)
@@ -159,7 +194,9 @@ class SubspaceGetter:
 
     def encode_image(self, img, height=1024, width=1024):
         with torch.no_grad():
-            img = self.pipe.image_processor.preprocess(img, width=width, height=height).to(dtype=self.pipe.vae.dtype)
+            img = self.pipe.image_processor.preprocess(
+                img, width=width, height=height
+            ).to(dtype=self.pipe.vae.dtype, device=self.pipe.vae.device)
 
             latent = self.pipe.vae.encode(img).latent_dist.sample()
             latent = latent * self.pipe.vae.config.scaling_factor
@@ -453,7 +490,7 @@ class SubspaceGetter:
                 #     significance_threshold=2.5 / min(real_tokens_grad.shape)
                 # )
 
-                token_grad = tokens_grad[:, self.get_token_pos(prompt, token), :]
+                token_grad = real_tokens_grad[:, self.get_token_pos(prompt, token), :]
                 token_grad = token_grad.cpu()
 
                 # if self.cfg.remove_significant_directions:

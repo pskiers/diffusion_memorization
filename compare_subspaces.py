@@ -3,14 +3,18 @@ import argparse
 import gc
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from optim_utils import *
 import numpy as np
 import matplotlib.pyplot as plt
 from safetensors.torch import load_file
+from diffusers import UNet2DConditionModel, LCMScheduler
+from huggingface_hub import hf_hub_download
 
 from token_subspace import SubspaceGetter
 from local_sdxl_pipeline import LocalStableDiffusionXLPipeline
+from local_flux_pipeline import LocalFluxPipeline
 
 
 class Comparator:
@@ -128,7 +132,7 @@ class Comparator:
                     outpath=os.path.join(self.output_dir, f"directions_{i}_to_{j}.txt"),
                 )
                 exclusive_matrix[i][j] = exclusive_in_A
-            directions.append(D_A)
+            directions.append(pca_dict[i][0])
 
         return directions, exclusive_matrix
 
@@ -139,7 +143,7 @@ class Experimenter:
         models_dict: dict[str, torch.nn.Module],
         call_kwargs: dict[str, dict[str, Any]],
         output_dir: str,
-        imgs_per_experiment: int = 10,
+        imgs_per_experiment: int = 8,
         batch_size: int = 4,
         seed: int = 42,
     ):
@@ -209,6 +213,7 @@ class Experimenter:
         for r, imgs_row in enumerate(rows):
             for c, im in enumerate(imgs_row):
                 grid.paste(im, (c * single_w, r * single_h))
+        grid = grid.resize((grid_w // 2, grid_h // 2), Image.Resampling.LANCZOS)
         grid.save(output_path)
 
         model.to("cpu")
@@ -218,7 +223,7 @@ class Experimenter:
         token_interventions,
         prompt: str,
         token: str,
-        intervention_strenghts: list[int] = [0, 10, 15, 20, 30, 50, 70],
+        intervention_strenghts: list[int] = [0, 1, 5, 10, 30, 50, 70, 100, 150, 200],
         outname_prefix: str = "exp",
     ):
         os.makedirs(self.output_dir, exist_ok=True)
@@ -243,10 +248,10 @@ def load_grads(grads_dir, max_num=float("inf")):
     grads = []
     for fname in grad_files:
         grad = np.load(os.path.join(grads_dir, fname))
-        grads.append(grad.flatten())
+        grads.append(grad)
         if len(grads) > max_num:
             break
-    grad_matrix = np.stack(grads, axis=0).astype(np.float32)
+    grad_matrix = np.concatenate(grads, axis=0).astype(np.float32)
     grad_matrix = torch.from_numpy(grad_matrix)
     return grad_matrix
 
@@ -274,6 +279,64 @@ def get_model(model_id):
     ).to("cpu")
 
 
+def get_flux_model(model_id):
+    return LocalFluxPipeline.from_pretrained(
+        model_id,
+        torch_dtype=torch.bfloat16,
+        safety_checker=None,
+        requires_safety_checker=False,
+        cache_dir="../model_cache",
+    ).to("cpu")
+
+
+def get_sdxl_dmd_model():
+    base_model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+    repo_name = "tianweiy/DMD2"
+    ckpt_name = "dmd2_sdxl_4step_unet_fp16.bin"
+    # Load model.
+    unet = UNet2DConditionModel.from_config(
+        base_model_id,
+        subfolder="unet"
+    ).to(torch.float16)
+    unet.load_state_dict(
+        torch.load(
+            hf_hub_download(
+                repo_name,
+                ckpt_name,
+                cache_dir="../model_cache"
+            )
+        )
+    )
+    pipe = LocalStableDiffusionXLPipeline.from_pretrained(
+        base_model_id,
+        unet=unet,
+        torch_dtype=torch.float16,
+        variant="fp16",
+        cache_dir="../model_cache"
+    )
+    pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
+    return pipe.to("cpu")
+
+
+def sample_sum_normalize(vectors, k, n):
+    """
+    Args:
+        vectors (torch.Tensor): Vectors (must be same shape).
+        k (int): Number of n-plets to sample.
+        n (int): Number of vectors per n-plet.
+
+    Returns:
+        torch.Tensor: A tensor of shape (k, vector_dim) containing the normalized sums.
+    """
+    data = vectors
+    num_vectors = data.shape[0]
+    indices = torch.randint(0, num_vectors, (k, n), device=data.device)
+    selected_vectors = data[indices]
+    sums = selected_vectors.sum(dim=1)
+    normalized_sums = F.normalize(sums, p=2, dim=1)
+    return normalized_sums
+
+
 def main(
     dirs,
     prompt,
@@ -285,6 +348,11 @@ def main(
     sae_low=-5,
     sae_high=0,
     add_bias=False,
+    random_n=1,
+    imgs_per_experiment=8,
+    batch_size=4,
+    intervention_strenghts=[0, 10, 15, 20, 30, 50, 70],
+    num_interventions=5,
 ):
     comparator = Comparator(output_dir=output_dir)
 
@@ -317,6 +385,8 @@ def main(
                 for l, dir in enumerate(dirs)
                 if l not in exclusive_matrix[i][j]
             ]
+    if len(directions) == 1:
+        exp_dict["pca_dirs"] = directions[0]
     for i, sae_dirs in enumerate(sae_directions):
         exp_dict[f"sae_dir_{i}"] = sae_dirs
 
@@ -324,14 +394,21 @@ def main(
         models_dict=models_dict,
         call_kwargs=call_kwargs,
         output_dir=output_dir,
+        batch_size=batch_size,
+        imgs_per_experiment=imgs_per_experiment,
     )
 
     for exp_name, token_interventions in exp_dict.items():
+        if random_n > 1:
+            interventions = sample_sum_normalize(token_interventions, k=num_interventions, n=random_n)
+        else:
+            interventions = F.normalize(token_interventions, p=2, dim=1)
         experimenter.run(
-            token_interventions=token_interventions[:8],
+            token_interventions=interventions[:num_interventions],
             prompt=prompt,
             token=token,
             outname_prefix=exp_name,
+            intervention_strenghts=intervention_strenghts,
         )
 
 
@@ -363,21 +440,43 @@ if __name__ == "__main__":
         default=False,
         help="Whether to add bias to sae directions"
     )
+    parser.add_argument("--random_n", type=int, default=1, help="Number of random directions to sum")
+    parser.add_argument("--model", type=str, default="sdxl-dmd", help="Model to use")
+    parser.add_argument("--num_samples", type=int, default=8, help="Numbers of samples per experiment (columns)")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size for generation")
+    parser.add_argument("--intervention_strengths", type=int, nargs="+", default=[0, 10, 15, 20, 30, 50, 70], help="Intervention strengths to use")
+    parser.add_argument("--num_interventions", type=int, default=5, help="Number of token interventions to use per experiment")
     args = parser.parse_args()
 
     models_dict = dict()
-    models_dict["sdxl"] = get_model("stabilityai/stable-diffusion-xl-base-1.0")
-    models_dict["sdxl_turbo"] = get_model("stabilityai/sdxl-turbo")
-
     call_kwargs = dict()
-    call_kwargs["sdxl"] = dict(
-        num_inference_steps=50,
-        guidance_scale=7.5,
-    )
-    call_kwargs["sdxl_turbo"] = dict(
-        num_inference_steps=4,
-        guidance_scale=0.0,
-    )
+    if args.model == "sdxl-dmd":
+        models_dict["sdxl-dmd"] = get_sdxl_dmd_model()
+        call_kwargs["sdxl-dmd"] = dict(
+            num_inference_steps=4,
+            guidance_scale=0.0,
+            timesteps=[999, 749, 499, 249],
+        )
+    elif args.model == "sdxl":
+        models_dict["sdxl"] = get_model("stabilityai/stable-diffusion-xl-base-1.0")
+        call_kwargs["sdxl"] = dict(
+            num_inference_steps=50,
+            guidance_scale=7.5,
+        )
+    elif args.model == "sdxl-turbo":
+        models_dict["sdxl_turbo"] = get_model("stabilityai/sdxl-turbo")
+        call_kwargs["sdxl_turbo"] = dict(
+            num_inference_steps=4,
+            guidance_scale=0.0,
+        )
+    elif args.model == "flux-schnell":
+        models_dict["flux-schnell"] = get_flux_model("black-forest-labs/FLUX.1-schnell")
+        call_kwargs["flux-schnell"] = dict(
+            num_inference_steps=4,
+            guidance_scale=0.0,
+        )
+    else:
+        raise ValueError(f"Unknown model {args.model}")
 
     dirs = {metdir.split(":")[1]: metdir.split(":")[0] for metdir in args.dirs}
 
@@ -392,4 +491,9 @@ if __name__ == "__main__":
         sae_low=args.sae_low,
         sae_high=args.sae_high,
         add_bias=args.add_bias,
+        random_n=args.random_n,
+        imgs_per_experiment=args.num_samples,
+        batch_size=args.batch_size,
+        intervention_strenghts=args.intervention_strengths,
+        num_interventions=args.num_interventions,
     )
