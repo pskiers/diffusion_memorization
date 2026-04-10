@@ -1,28 +1,28 @@
 defaults:
   - _self_
 
-out_dir: ./outputs
+out_dir: /data/pskiers/concept_dimention/
 name: sdxl-with-interventions-monster
 seed: 0
 
 model:
-  model_class: local_sdxl_pipeline.LocalStableDiffusionXLPipeline
-  model_id: stabilityai/stable-diffusion-xl-base-1.0 # stabilityai/sdxl-turbo
+  model_class: custom_pipelines.local_sdxl_pipeline.LocalStableDiffusionXLPipeline
+  model_id: sdxl-dmd # stabilityai/stable-diffusion-xl-base-1.0 # stabilityai/sdxl-turbo
   lora_path: null # ../diffusers/examples/dreambooth/lora-trained-xl-prior_preservation/pytorch_lora_weights.safetensors
   device_map: null
-  num_inference_steps: 50
+  num_inference_steps: 4
 call_kwargs:
-  width: 1024
-  height: 1024
-  num_inference_steps: 50
-  guidance_scale: 7.5
+  num_inference_steps: 4
+  guidance_scale: 0.0
+  timesteps: [999, 749, 499, 249]
 
 prompt: "A picture of a monster"
 token: "monster"
 min_intervention_strenght: 25
 max_intervention_strenght: 45
+num_random_directions: 3
 
-batch_size: 5
+batch_size: 3
 num_samples: 10000
 directions_path: "../universal-diffsae/sae-ckpts/monster-k32-exp-factor-8_grads"
 direction_type: "sae"

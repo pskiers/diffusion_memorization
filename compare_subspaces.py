@@ -1,6 +1,8 @@
 import os
 import argparse
 import gc
+from typing import Any
+import json
 
 import torch
 import torch.nn.functional as F
@@ -13,8 +15,8 @@ from diffusers import UNet2DConditionModel, LCMScheduler
 from huggingface_hub import hf_hub_download
 
 from token_subspace import SubspaceGetter
-from local_sdxl_pipeline import LocalStableDiffusionXLPipeline
-from local_flux_pipeline import LocalFluxPipeline
+from custom_pipelines.local_sdxl_pipeline import LocalStableDiffusionXLPipeline
+from custom_pipelines.local_flux_pipeline import LocalFluxPipeline
 
 
 class Comparator:
@@ -249,11 +251,10 @@ def load_grads(grads_dir, max_num=float("inf")):
     for fname in grad_files:
         grad = np.load(os.path.join(grads_dir, fname))
         grads.append(grad)
-        if len(grads) > max_num:
-            break
     grad_matrix = np.concatenate(grads, axis=0).astype(np.float32)
     grad_matrix = torch.from_numpy(grad_matrix)
-    return grad_matrix
+    max_num = len(grad_matrix) if max_num == float("inf") else max_num
+    return grad_matrix[:max_num]
 
 
 def load_sae_directions(sae_ckpt_path, low=-5, high=0, add_bias=True):

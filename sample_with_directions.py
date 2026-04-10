@@ -1,6 +1,6 @@
 import os
 import importlib
-import tqdm
+from tqdm import tqdm
 import gc
 
 import hydra
@@ -110,7 +110,7 @@ class SamplerWithDirections:
 
     def sample(self):
         if self.direction_type == "grad":
-            grads = load_grads(self.directions_path)
+            grads = load_grads(self.directions_path, max_num=2500)
             threshold = 2.5 / 2048  # NOTE hardcoded for sdxl
             directions = SubspaceGetter.find_significant_directions(
                 grads, significance_threshold=threshold
@@ -130,7 +130,7 @@ class SamplerWithDirections:
                 min_directions, max_directions = map(int, self.num_random_directions.split("-"))
                 curr_num_random_directions = torch.randint(min_directions, max_directions + 1, (1,)).item()
                 batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=curr_num_random_directions)
-            else: 
+            else:
                 batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=self.num_random_directions)
             batch_intervention_strenghts = torch.empty(self.batch_size).uniform_(self.low, self.high)
             images = self.pipe(
