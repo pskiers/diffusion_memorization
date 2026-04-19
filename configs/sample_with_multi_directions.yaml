@@ -17,13 +17,13 @@ call_kwargs:
   timesteps: [999, 749, 499, 249]
 
 prompt: "A picture of a monster"
-token: "monster"
+target_tokens: ["picture", "monster"]
 min_intervention_strenght: 25
 max_intervention_strenght: 45
 num_random_directions: 3
 
 batch_size: 3
-num_samples: 10000
+num_samples: 100
 directions_path: "../universal-diffsae/sae-ckpts/monster-k32-exp-factor-8_grads"
 direction_type: "sae"
 

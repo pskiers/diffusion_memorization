@@ -12,15 +12,15 @@ from diffusers import DDIMScheduler, AutoencoderKL, UNet2DConditionModel, LCMSch
 from huggingface_hub import hf_hub_download
 from optim_utils import *
 from compare_subspaces import load_grads, load_sae_directions, sample_sum_normalize
-from token_subspace import SubspaceGetter
+from multi_token_subspace import SubspaceGetter
 
 
-class SamplerWithDirections:
+class SamplerWithMultiDirections:
     def __init__(self, cfg):
         self.cfg = cfg
         self.pipe = self.setup_model(cfg)
         self.prompt = self.cfg.prompt
-        self.token = self.token
+        self.target_tokens = self.cfg.target_tokens
         self.batch_size = self.cfg.batch_size
         self.num_samples = self.cfg.num_samples
         self.directions_path = self.cfg.directions_path
@@ -102,16 +102,24 @@ class SamplerWithDirections:
         pipe.scheduler.set_timesteps(cfg.model.num_inference_steps)
         return pipe
 
-    def get_token_position(self, prompt: str, token: str) -> int:
-        tokens = self.pipe.tokenizer.encode(prompt)
-        tokens = tokens[:77]
-        all_tokes = {self.pipe.tokenizer.decode(curr_token): i for i, curr_token in enumerate(tokens)}
-        return all_tokes[token]
+    
+    def get_tokens_pos(self, prompt, target_tokens):
+        tokens = self.pipe.tokenizer.encode(prompt)[:77]
+        all_tokes = {
+            self.pipe.tokenizer.decode([t]).strip(): [i] 
+            for i, t in enumerate(tokens)
+        } 
+        indices = [idx for key in target_tokens for idx in all_tokes.get(key, [])]
+        # indices = torch.tensor(indices, dtype=torch.long)
+        return indices
 
     def sample(self):
+        
+        n_tokens = len(self.target_tokens)
+        
         if self.direction_type == "grad":
             grads = load_grads(self.directions_path, max_num=2500)
-            threshold = 2.5 / 2048  # NOTE hardcoded for sdxl
+            threshold = 2.5 / 2048  # NOTE hardcoded for sdxl, change?
             directions = SubspaceGetter.find_significant_directions(
                 grads, significance_threshold=threshold
             )[0]
@@ -132,14 +140,26 @@ class SamplerWithDirections:
                 batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=curr_num_random_directions)
             else:
                 batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=self.num_random_directions)
+            
+            batch_directions = batch_directions * n_tokens
             batch_intervention_strenghts = torch.empty(self.batch_size).uniform_(self.low, self.high)
+            prompt_outputs = self.pipe.encode_prompt(self.prompt)
+            prompt_embeds, _, pooled_prompt_embeds, _ = prompt_outputs
+            batch_directions = batch_directions.to(prompt_embeds.device) # fix 
+            directions_reshaped = batch_directions.view(self.batch_size, -1, 2048)
+            indices = self.get_tokens_pos(self.prompt, self.target_tokens) 
+            batch_embeds = prompt_embeds.repeat(self.batch_size, 1, 1) 
+
+            for i in range(self.batch_size):
+                strength = batch_intervention_strenghts[i]
+                for j, pos in enumerate(indices):
+                    batch_embeds[i, pos] += strength * directions_reshaped[i, j]
+
             images = self.pipe(
-                [self.prompt] * self.batch_size,
+                prompt_embeds=batch_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds.repeat(self.batch_size, 1),
                 num_images_per_prompt=1,
-                token_intervention=batch_directions,
-                token_intervention_pos=[self.get_token_position(self.prompt, self.token)] * self.batch_size,
-                intervention_strenght=batch_intervention_strenghts,
-                **self.kwargs,
+                **self.kwargs
             ).images
             gc.collect()
             torch.cuda.empty_cache()
@@ -147,10 +167,10 @@ class SamplerWithDirections:
                 img.save(os.path.join(self.outpath, f"{i * self.batch_size + j}.png"))
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="sample_with_directions")
+@hydra.main(version_base=None, config_path="configs", config_name="sample_with_multi_directions")
 def main(cfg: DictConfig):
     cfg = instantiate(cfg)
-    sampler = SamplerWithDirections(cfg)
+    sampler = SamplerWithMultiDirections(cfg)
     sampler.sample()
 
 

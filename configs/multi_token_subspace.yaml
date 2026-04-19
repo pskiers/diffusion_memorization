@@ -42,7 +42,7 @@ model:
     # "conv_out": 0
 data:
   prompt: "A photograph of the inside of a subway train. There are frogs sitting on the seats. One of them is reading a newspaper. The window shows the river in the background."
-  token: "frogs"
+  target_tokens: ["frogs"]
   timesteps: [50]
   image_folder: /net/scratch/hscra/plgrid/plgpawel269/LID-project/data/sdxl_subspace_tokens/frog
 

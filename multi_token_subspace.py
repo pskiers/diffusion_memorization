@@ -259,7 +259,7 @@ class SubspaceGetter:
         cross-dataset comparisons.
 
         Args:
-            token_grads (torch.Tensor): A tensor of shape (num_vect, vect_dim).
+            tokens_grads (torch.Tensor): A tensor of shape (num_vect, vect_dim * len(tokens)).
             n_directions (int, optional): Returns the top 'n' principal directions.
             significance_threshold (float, optional): Returns all directions with
                 an explained variance ratio greater than this threshold.
@@ -280,7 +280,7 @@ class SubspaceGetter:
             print("Warning: 'n_directions' takes precedence over 'significance_threshold'.")
             significance_threshold = None
 
-        num_vect, vect_dim = token_grads.shape
+        num_vect, vect_dim = token_grads.shape #name
 
         centered_data = token_grads - token_grads.mean(dim=0, keepdim=True)  # center the data
 
@@ -338,6 +338,8 @@ class SubspaceGetter:
     @staticmethod
     def remove_direction(vectors: torch.Tensor, direction: torch.Tensor):
         """
+        Change vect_dim
+        
         Removes the component of a direction from a set of vectors.
 
         This is done by subtracting the projection of each vector onto the direction.
@@ -369,11 +371,16 @@ class SubspaceGetter:
 
         return vectors_after_removal
 
-    def get_token_pos(self, prompt, token):
-        tokens = self.pipe.tokenizer.encode(prompt)
-        tokens = tokens[:77]
-        all_tokes = {self.pipe.tokenizer.decode(curr_token): i for i, curr_token in enumerate(tokens)}
-        return all_tokes[token]
+    #all positions (no which token info)   
+    def get_tokens_pos(self, prompt, target_tokens):
+        tokens = self.pipe.tokenizer.encode(prompt)[:77]
+        all_tokes = {
+            self.pipe.tokenizer.decode([t]).strip(): [i] 
+            for i, t in enumerate(tokens)
+        } 
+        indices = [idx for key in target_tokens for idx in all_tokes.get(key, [])]
+        # indices = torch.tensor(indices, dtype=torch.long)
+        return indices
 
     @staticmethod
     def collated_pair_iterator(data_list, batch_size, shuffle=True):
@@ -415,7 +422,7 @@ class SubspaceGetter:
 
     def run(self):
         prompt = self.cfg.data.prompt
-        token = self.cfg.data.token
+        target_tokens = self.cfg.data.target_tokens
 
         images = list(self.image_iterator(self.cfg.data.image_folder))
         dataset = self.collated_pair_iterator(
@@ -425,14 +432,12 @@ class SubspaceGetter:
         for t in self.timesteps:
             print(f"Processing timestep {t}")
             num_processed = sum(len(v) for v in self.done_grads_dict[t].values())
-            shard = np.empty((0, 2048))
+            shard = None
             shard_pairs = []
 
             start_time = time.time()
             for imgs, names, ref_imgs, ref_names in dataset:
                 for i, (name, ref_name) in enumerate(zip(names, ref_names)):
-                    print(imgs)
-                    print(len(imgs))
                     if ref_name in self.done_grads_dict[t].get(name, []):
                         imgs.pop(i)
                         names.pop(i)
@@ -441,7 +446,7 @@ class SubspaceGetter:
 
                 if num_processed > self.cfg.max_pairs:
                     break
-                print(len(imgs))
+
                 latent = self.encode_image(imgs, width=self.cfg.model.width, height=self.cfg.model.height)
                 noised_latent = self.noise_image(latent, t)
 
@@ -491,17 +496,24 @@ class SubspaceGetter:
                 #     real_tokens_grad,
                 #     significance_threshold=2.5 / min(real_tokens_grad.shape)
                 # )
-
-                token_grad = real_tokens_grad[:, self.get_token_pos(prompt, token), :]
+                
+                indices = self.get_tokens_pos(prompt, target_tokens)
+                token_grad = real_tokens_grad[:, indices, :]
+                batch_size = token_grad.shape[0]
+                token_grad = token_grad.view(batch_size, -1) #shape [batch, hidden_dim * len(target_tokens)]
                 token_grad = token_grad.cpu()
+
 
                 # if self.cfg.remove_significant_directions:
                 #     for direction in directions:
                 #         token_grad = self.remove_direction(token_grad, direction.to(token_grad.dtype))
 
                 token_grad = token_grad.numpy()
-
-                shard = np.concatenate([shard, token_grad], axis=0)
+                
+                if shard is None:
+                    shard = token_grad
+                else:
+                    shard = np.concatenate([shard, token_grad], axis=0)
                 shard_pairs += [[n, rn] for n, rn in zip(names, ref_names)]
                 num_processed += len(token_grad)
                 if shard.shape[0] >= self.cfg.shard_size:
@@ -546,7 +558,7 @@ def format_time(seconds):
     return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
 
 
-@hydra.main(version_base=None, config_path="configs", config_name="token_subspace")
+@hydra.main(version_base=None, config_path="configs", config_name="multi_token_subspace")
 def main(cfg: DictConfig):
     cfg = instantiate(cfg)
     subspace_getter = SubspaceGetter(cfg)
