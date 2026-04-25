@@ -218,7 +218,9 @@ class SubspaceGetter:
             for fname in grad_files:
                 grad = np.load(os.path.join(grads_dir, fname))
                 grads.append(grad.flatten())
-
+            print(t)
+            print(len(grads))
+            print(grads[0].shape)
             grad_matrix = np.stack(grads, axis=0).astype(np.float32)
             u, s, vh = np.linalg.svd(grad_matrix, full_matrices=False)
 
@@ -536,7 +538,7 @@ class SubspaceGetter:
                 print(
                     f"Grads gathered: {num_processed}/{self.cfg.max_pairs} \t Time {format_time(elapsed_sec)}/{format_time(expected_total_sec)}\r"
                 )
-        self.do_svd()
+        #self.do_svd()
 
 
 def format_time(seconds):

@@ -2,7 +2,7 @@ defaults:
   - _self_
 
 out_dir: /net/scratch/hscra/plgrid/plgekaczmarczyk/LID-project/diffusion_memorization/outputs
-name: sdxl-with-interventions-monster
+name: sdxl-with-interventions-art
 seed: 0
 
 model:
@@ -16,14 +16,14 @@ call_kwargs:
   guidance_scale: 0.0
   timesteps: [999, 749, 499, 249]
 
-prompt: "A picture of a monster"
-target_tokens: ["picture", "monster"]
+prompt: "artwork in the style of a famous artist"
+target_tokens: ["artwork", "artist"]
 min_intervention_strenght: 25
 max_intervention_strenght: 45
 num_random_directions: 3
 
-batch_size: 3
-num_samples: 100
+batch_size: 4
+num_samples: 20
 directions_path: "../universal-diffsae/sae-ckpts/monster-k32-exp-factor-8_grads"
 direction_type: "sae"
 

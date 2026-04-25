@@ -14,7 +14,7 @@ from safetensors.torch import load_file
 from diffusers import UNet2DConditionModel, LCMScheduler
 from huggingface_hub import hf_hub_download
 
-from token_subspace import SubspaceGetter
+from multi_token_subspace import SubspaceGetter
 from custom_pipelines.local_sdxl_pipeline import LocalStableDiffusionXLPipeline
 from custom_pipelines.local_flux_pipeline import LocalFluxPipeline
 
@@ -155,18 +155,22 @@ class Experimenter:
         self.imgs_per_experiment = imgs_per_experiment
         self.seed = seed
         self.batch_size = batch_size
-
-    def get_token_position(self, model, prompt: str, token: str) -> int:
-        tokens = model.tokenizer.encode(prompt)
-        tokens = tokens[:77]
-        all_tokes = {model.tokenizer.decode(curr_token): i for i, curr_token in enumerate(tokens)}
-        return all_tokes[token]
+    
+    def get_tokens_position(self, model, prompt: str, target_tokens: list[str]) -> list[int]:
+        tokens = model.tokenizer.encode(prompt)[:77]
+        all_tokes = {
+            model.tokenizer.decode([t]).strip(): [i] 
+            for i, t in enumerate(tokens)
+        } 
+        indices = [idx for key in target_tokens for idx in all_tokes.get(key, [])]
+        # indices = torch.tensor(indices, dtype=torch.long)
+        return indices
 
     def run_single_experiment(
         self,
         model_name: str,
         prompt: str,
-        token: str,
+        target_tokens: list[str],
         output_path: str,
         token_intervention: torch.Tensor,
         intervention_strenghts: list[int] = [0, 10, 15, 20, 30, 50, 70],
@@ -175,31 +179,44 @@ class Experimenter:
         kwargs = self.call_kwargs[model_name]
         model = self.models_dict[model_name]
         model.to("cuda")
+        
+        prompt_outputs = model.encode_prompt(prompt)
+        base_prompt_embeds, _, base_pooled_prompt_embeds, _ = prompt_outputs
+        token_intervention_reshaped = token_intervention.view(-1, 2048).to(base_prompt_embeds.device)
+        indices = self.get_tokens_position(model, prompt, target_tokens) 
 
         rows = []
         for intervention in intervention_strenghts:
             set_random_seed(self.seed)
             imgs_row = []
-            for _ in range(self.imgs_per_experiment // self.batch_size):
+            prompt_embeds = base_prompt_embeds.clone()
+            for j, pos in enumerate(indices):
+                prompt_embeds[0, pos] += intervention * token_intervention_reshaped[j]
+                
+            batch_embeds = prompt_embeds.repeat(self.batch_size, 1, 1)
+            batch_pooled = base_pooled_prompt_embeds.repeat(self.batch_size, 1)
+            
+            for _ in range(self.imgs_per_experiment // self.batch_size):           
                 result = model(
-                    [prompt] * self.batch_size,
-                    num_images_per_prompt=1,
-                    token_intervention=torch.stack([token_intervention] * self.batch_size, dim=0),
-                    token_intervention_pos=torch.tensor([self.get_token_position(model, prompt, token)] * self.batch_size),
-                    intervention_strenght=torch.tensor([intervention] * self.batch_size),
-                    **kwargs,
+                prompt_embeds=batch_embeds,
+                pooled_prompt_embeds=batch_pooled,
+                num_images_per_prompt=1,
+                **kwargs
                 )
                 gc.collect()
                 torch.cuda.empty_cache()
                 imgs_row += [im.convert("RGB") for im in result.images]
-            if self.imgs_per_experiment % self.batch_size != 0:
+            
+            remainder = self.imgs_per_experiment % self.batch_size
+            if remainder != 0:
+                remainder_embeds = prompt_embeds.repeat(remainder, 1, 1)
+                remainder_pooled = base_pooled_prompt_embeds.repeat(remainder, 1)
+                
                 result = model(
-                    [prompt] * (self.imgs_per_experiment % self.batch_size),
+                    prompt_embeds=remainder_embeds,
+                    pooled_prompt_embeds=remainder_pooled,
                     num_images_per_prompt=1,
-                    token_intervention=torch.stack([token_intervention] * (self.imgs_per_experiment % self.batch_size), dim=0),
-                    token_intervention_pos=torch.tensor([self.get_token_position(model, prompt, token)] * (self.imgs_per_experiment % self.batch_size)),
-                    intervention_strenght=torch.tensor([intervention] * (self.imgs_per_experiment % self.batch_size)),
-                    **kwargs,
+                    **kwargs
                 )
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -224,7 +241,7 @@ class Experimenter:
         self,
         token_interventions,
         prompt: str,
-        token: str,
+        target_tokens: list[str],
         intervention_strenghts: list[int] = [0, 1, 5, 10, 30, 50, 70, 100, 150, 200],
         outname_prefix: str = "exp",
     ):
@@ -238,7 +255,7 @@ class Experimenter:
                 self.run_single_experiment(
                     model_name=model_name,
                     prompt=prompt,
-                    token=token,
+                    target_tokens=target_tokens,
                     output_path=output_path,
                     token_intervention=token_intervention,
                     intervention_strenghts=intervention_strenghts,
@@ -341,7 +358,7 @@ def sample_sum_normalize(vectors, k, n):
 def main(
     dirs,
     prompt,
-    token,
+    target_tokens,
     models_dict,
     call_kwargs,
     output_dir,
@@ -404,10 +421,11 @@ def main(
             interventions = sample_sum_normalize(token_interventions, k=num_interventions, n=random_n)
         else:
             interventions = F.normalize(token_interventions, p=2, dim=1)
+        interventions *= len(target_tokens)
         experimenter.run(
             token_interventions=interventions[:num_interventions],
             prompt=prompt,
-            token=token,
+            target_tokens=target_tokens,
             outname_prefix=exp_name,
             intervention_strenghts=intervention_strenghts,
         )
@@ -423,7 +441,14 @@ if __name__ == "__main__":
         help="Directory for set either grads or sae directions. Should be in a format grad:<path> or sae:<path>"
     )
     parser.add_argument("--prompt", type=str, required=True, help="Prompt used for generation")
-    parser.add_argument("--token", type=str, required=True, help="Token to intervene on")
+    parser.add_argument(
+    "--target_tokens", 
+    type=str,           
+    nargs="+",         
+    required=True, 
+    help="Tokens to intervene on"
+    )
+    #parser.add_argument("--target_tokens", type=list[str], required=True, help="Tokens to intervene on")
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for results")
     parser.add_argument(
         "--no_exclude_sae_from_comparison",
@@ -484,7 +509,7 @@ if __name__ == "__main__":
     main(
         dirs=dirs,
         prompt=args.prompt,
-        token=args.token,
+        target_tokens=args.target_tokens,
         models_dict=models_dict,
         call_kwargs=call_kwargs,
         output_dir=args.output_dir,

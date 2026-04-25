@@ -41,8 +41,8 @@ model:
     # "conv_norm_out": 0
     # "conv_out": 0
 data:
-  prompt: "A photograph of the inside of a subway train. There are frogs sitting on the seats. One of them is reading a newspaper. The window shows the river in the background."
-  token: "frogs"
+  prompt: "artwork in the style of a famous artist"
+  token: "artist"
   timesteps: [50]
   image_folder: /net/scratch/hscra/plgrid/plgpawel269/LID-project/data/sdxl_subspace_tokens/frog
 
@@ -51,5 +51,5 @@ remove_common: true
 remove_significant_directions: false
 randomize_pairs: false
 max_pairs: 30000
-shard_size: 20
-batch_size: 1
+shard_size: 2000
+batch_size: 2

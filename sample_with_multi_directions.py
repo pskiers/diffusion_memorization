@@ -118,7 +118,7 @@ class SamplerWithMultiDirections:
         n_tokens = len(self.target_tokens)
         
         if self.direction_type == "grad":
-            grads = load_grads(self.directions_path, max_num=2500)
+            grads = load_grads(self.directions_path)
             threshold = 2.5 / 2048  # NOTE hardcoded for sdxl, change?
             directions = SubspaceGetter.find_significant_directions(
                 grads, significance_threshold=threshold

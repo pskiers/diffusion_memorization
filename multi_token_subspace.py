@@ -246,49 +246,39 @@ class SubspaceGetter:
         with open(subspace_size_path, "w") as f:
             f.write(str(subspace_sizes))
 
-    @staticmethod
+    
+    @staticmethod  
     def find_significant_directions(
         token_grads: torch.Tensor,
         n_directions: int = None,
         significance_threshold: float = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Performs PCA on a set of vectors and returns significant components.
-
-        Also returns the total variance and covariance matrix needed for
-        cross-dataset comparisons.
-
-        Args:
-            tokens_grads (torch.Tensor): A tensor of shape (num_vect, vect_dim * len(tokens)).
-            n_directions (int, optional): Returns the top 'n' principal directions.
-            significance_threshold (float, optional): Returns all directions with
-                an explained variance ratio greater than this threshold.
-                (n_directions takes precedence if both are specified).
-
-        Returns:
-            A tuple containing:
-            - directions (torch.Tensor): Tensor of shape (k, vect_dim) where 'k' is
-            the number of directions found. Each row is a significant direction.
-            - significances (torch.Tensor): Tensor of shape (k,) with the explained
-            variance ratio for each corresponding direction.
-            - total_variance (torch.Tensor): A scalar tensor representing the sum
-            of all eigenvalues (total variance in the data).
-            - covariance_matrix (torch.Tensor): The covariance matrix (C) of shape
-            (vect_dim, vect_dim).
-        """
+        
         if n_directions is not None and significance_threshold is not None:
             print("Warning: 'n_directions' takes precedence over 'significance_threshold'.")
             significance_threshold = None
 
-        num_vect, vect_dim = token_grads.shape #name
+        # --- FIX 1: Sanitize and Upcast ---
+        # SDXL-DMD gradients can be noisy; ensure we are in float64 for the math
+        token_grads = torch.nan_to_num(token_grads, nan=0.0, posinf=0.0, neginf=0.0)
+        token_grads = token_grads.to(torch.float64) 
+        
+        num_vect, vect_dim = token_grads.shape
 
-        centered_data = token_grads - token_grads.mean(dim=0, keepdim=True)  # center the data
+        # Center the data
+        centered_data = token_grads - token_grads.mean(dim=0, keepdim=True)
 
-        if num_vect < vect_dim:  # handle the "N < D" case
-            # C_small = (1/(N-1)) * X_centered @ X_centered.T   (shape N, N)
+        # handle the "N < D" case (Typical for few-sample experiments)
+        if num_vect < vect_dim:
+            # C_small shape (N, N)
             covariance_matrix_small = (1.0 / (num_vect - 1)) * (centered_data @ centered_data.T)
+            
+            # --- FIX 2: Diagonal Jitter for Stability ---
+            eps = 1e-12
+            covariance_matrix_small += torch.eye(num_vect, device=token_grads.device) * eps
 
             eigenvalues, eigenvectors_small = torch.linalg.eigh(covariance_matrix_small)
+            
             sorted_indices = torch.argsort(eigenvalues, descending=True)
             sorted_eigenvalues = eigenvalues[sorted_indices]
 
@@ -296,44 +286,54 @@ class SubspaceGetter:
             valid_eigenvalues = sorted_eigenvalues[valid_indices]
             valid_eigenvectors_small = eigenvectors_small[:, valid_indices]
 
+            # Use valid_eigenvalues for scaling
             scale_factors = (1.0 / torch.sqrt(valid_eigenvalues * (num_vect - 1)))
             sorted_eigenvectors = centered_data.T @ valid_eigenvectors_small * scale_factors.unsqueeze(0)
             sorted_eigenvalues = valid_eigenvalues
 
+            # Full covariance matrix for cross-comparison
             covariance_matrix = (1.0 / (num_vect - 1)) * (centered_data.T @ centered_data)
 
         # Standard case (N >= D)
         else:
-            # C = (1/(N-1)) * X_centered.T @ X_centered   (shape D, D)
             covariance_matrix = (1.0 / (num_vect - 1)) * (centered_data.T @ centered_data)
-            # get eigenvalues and eigenvectors of the (D, D) matrix
+            
+            # --- FIX 2: Diagonal Jitter ---
+            eps = 1e-12
+            covariance_matrix += torch.eye(vect_dim, device=token_grads.device) * eps
+
             eigenvalues, eigenvectors = torch.linalg.eigh(covariance_matrix)
             sorted_indices = torch.argsort(eigenvalues, descending=True)
             sorted_eigenvalues = eigenvalues[sorted_indices]
-            # eigenvectors are columns
             sorted_eigenvectors = eigenvectors[:, sorted_indices]
 
-        total_variance = torch.sum(sorted_eigenvalues)
+        # --- FIX 3: Casting back to Model Precision ---
+        # Convert results back to float32 so they are compatible with SDXL-DMD's weights
+        total_variance = torch.sum(sorted_eigenvalues).to(torch.float32)
+        
         if total_variance == 0:
-            return (torch.empty((0, vect_dim)), torch.empty((0,)),
-                    total_variance, covariance_matrix)
+            return (torch.empty((0, vect_dim), dtype=torch.float32), 
+                    torch.empty((0,), dtype=torch.float32),
+                    total_variance, 
+                    covariance_matrix.to(torch.float32))
 
-        explained_variances = sorted_eigenvalues / total_variance
+        explained_variances = (sorted_eigenvalues / total_variance).to(torch.float32)
+        sorted_eigenvectors = sorted_eigenvectors.to(torch.float32)
+        covariance_matrix = covariance_matrix.to(torch.float32)
 
         if n_directions is not None:
             num_to_return = min(n_directions, sorted_eigenvectors.shape[1])
-            # Eigenvectors are columns (dim, k), transpose to (k, dim)
             top_k_directions = sorted_eigenvectors[:, :num_to_return].T
             top_k_variances = explained_variances[:num_to_return]
             return top_k_directions, top_k_variances, total_variance, covariance_matrix
         elif significance_threshold is not None:
-            # Create a boolean mask for directions meeting the threshold
             mask = explained_variances > significance_threshold
             filtered_directions = sorted_eigenvectors[:, mask].T
             filtered_variances = explained_variances[mask]
             return filtered_directions, filtered_variances, total_variance, covariance_matrix
         else:
-            return sorted_eigenvectors.T, explained_variances, total_variance, covariance_matrix
+            return sorted_eigenvectors.T, explained_variances, total_variance, covariance_matrix       
+    
 
     @staticmethod
     def remove_direction(vectors: torch.Tensor, direction: torch.Tensor):
@@ -548,7 +548,7 @@ class SubspaceGetter:
                 print(
                     f"Grads gathered: {num_processed}/{self.cfg.max_pairs} \t Time {format_time(elapsed_sec)}/{format_time(expected_total_sec)}\r"
                 )
-        self.do_svd()
+        #self.do_svd()
 
 
 def format_time(seconds):

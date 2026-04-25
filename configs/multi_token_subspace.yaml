@@ -2,7 +2,7 @@ defaults:
   - _self_
 
 out_dir: ./outputs
-name: sdxl-frog-pca
+name: sdxl-art-pca
 seed: 0
 
 lora_path: null # ../diffusers/examples/dreambooth/lora-trained-xl-prior_preservation/pytorch_lora_weights.safetensors
@@ -15,34 +15,34 @@ model:
   num_inference_steps: 50
   guidance_scale: 7.5
   device_map: null
-   # text encoder
+    # #text encoder
     # "text_model": 3
-# 
-   # VAE
+ 
+    # #VAE
     # "encoder": 3
     # "decoder": 3
     # "quant_conv": 3
     # "post_quant_conv": 3
-# 
-  #  UNet
+ 
+    # #UNet
     # "text_projection": 0
     # "add_embedding": 0
     # "time_embedding": 0
-# 
+ 
     # "conv_in": 0
-# 
+ 
     # "down_blocks": 1
     # "mid_block": 0
     # "up_blocks.0": 2
     # "up_blocks.1": 0
     # "up_blocks.2": 3
     # "up_blocks.3": 2
-# 
-    # "conv_norm_out": 0
+ 
+    # "conv_norm_out": 0scancel
     # "conv_out": 0
 data:
-  prompt: "A photograph of the inside of a subway train. There are frogs sitting on the seats. One of them is reading a newspaper. The window shows the river in the background."
-  target_tokens: ["frogs"]
+  prompt: "artwork in the style of a famous artist"
+  target_tokens: ["artwork", "in", "the", "style", "of", "a", "famous", "artist"]
   timesteps: [50]
   image_folder: /net/scratch/hscra/plgrid/plgpawel269/LID-project/data/sdxl_subspace_tokens/frog
 
@@ -51,5 +51,5 @@ remove_common: true
 remove_significant_directions: false
 randomize_pairs: false
 max_pairs: 30000
-shard_size: 20
-batch_size: 1
+shard_size: 300
+batch_size: 4
