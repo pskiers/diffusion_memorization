@@ -170,6 +170,7 @@ class Experimenter:
         self,
         model_name: str,
         prompt: str,
+        initial_prompt: str,
         target_tokens: list[str],
         output_path: str,
         token_intervention: torch.Tensor,
@@ -184,6 +185,7 @@ class Experimenter:
         base_prompt_embeds, _, base_pooled_prompt_embeds, _ = prompt_outputs
         token_intervention_reshaped = token_intervention.view(-1, 2048).to(base_prompt_embeds.device)
         indices = self.get_tokens_position(model, prompt, target_tokens) 
+        indices_initial = self.get_tokens_position(model, initial_prompt, target_tokens)
 
         rows = []
         for intervention in intervention_strenghts:
@@ -191,7 +193,7 @@ class Experimenter:
             imgs_row = []
             prompt_embeds = base_prompt_embeds.clone()
             for j, pos in enumerate(indices):
-                prompt_embeds[0, pos] += intervention * token_intervention_reshaped[j]
+                prompt_embeds[0, pos] += intervention * token_intervention_reshaped[int(indices_initial[j] - 1)]
                 
             batch_embeds = prompt_embeds.repeat(self.batch_size, 1, 1)
             batch_pooled = base_pooled_prompt_embeds.repeat(self.batch_size, 1)
@@ -234,13 +236,13 @@ class Experimenter:
                 grid.paste(im, (c * single_w, r * single_h))
         grid = grid.resize((grid_w // 2, grid_h // 2), Image.Resampling.LANCZOS)
         grid.save(output_path)
-
         model.to("cpu")
 
     def run(
         self,
         token_interventions,
         prompt: str,
+        initial_prompt: str,
         target_tokens: list[str],
         intervention_strenghts: list[int] = [0, 1, 5, 10, 30, 50, 70, 100, 150, 200],
         outname_prefix: str = "exp",
@@ -255,6 +257,7 @@ class Experimenter:
                 self.run_single_experiment(
                     model_name=model_name,
                     prompt=prompt,
+                    initial_prompt=initial_prompt,
                     target_tokens=target_tokens,
                     output_path=output_path,
                     token_intervention=token_intervention,
@@ -271,7 +274,7 @@ def load_grads(grads_dir, max_num=float("inf")):
     grad_matrix = np.concatenate(grads, axis=0).astype(np.float32)
     grad_matrix = torch.from_numpy(grad_matrix)
     max_num = len(grad_matrix) if max_num == float("inf") else max_num
-    return grad_matrix[:max_num]
+    return grad_matrix[:max_num,2048 :]
 
 
 def load_sae_directions(sae_ckpt_path, low=-5, high=0, add_bias=True):
@@ -358,6 +361,7 @@ def sample_sum_normalize(vectors, k, n):
 def main(
     dirs,
     prompt,
+    initial_prompt,
     target_tokens,
     models_dict,
     call_kwargs,
@@ -425,6 +429,7 @@ def main(
         experimenter.run(
             token_interventions=interventions[:num_interventions],
             prompt=prompt,
+            initial_prompt=initial_prompt,
             target_tokens=target_tokens,
             outname_prefix=exp_name,
             intervention_strenghts=intervention_strenghts,
@@ -441,6 +446,7 @@ if __name__ == "__main__":
         help="Directory for set either grads or sae directions. Should be in a format grad:<path> or sae:<path>"
     )
     parser.add_argument("--prompt", type=str, required=True, help="Prompt used for generation")
+    parser.add_argument("--initial_prompt", type=str, required=True, help="Prompt used before for computing gradients ")
     parser.add_argument(
     "--target_tokens", 
     type=str,           
@@ -509,6 +515,7 @@ if __name__ == "__main__":
     main(
         dirs=dirs,
         prompt=args.prompt,
+        initial_prompt=args.initial_prompt,
         target_tokens=args.target_tokens,
         models_dict=models_dict,
         call_kwargs=call_kwargs,

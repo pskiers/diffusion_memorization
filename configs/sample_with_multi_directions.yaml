@@ -2,7 +2,7 @@ defaults:
   - _self_
 
 out_dir: /net/scratch/hscra/plgrid/plgekaczmarczyk/LID-project/diffusion_memorization/outputs
-name: sdxl-with-interventions-art
+name: sdxl-with-interventions-character
 seed: 0
 
 model:
@@ -16,14 +16,14 @@ call_kwargs:
   guidance_scale: 0.0
   timesteps: [999, 749, 499, 249]
 
-prompt: "artwork in the style of a famous artist"
-target_tokens: ["artwork", "artist"]
-min_intervention_strenght: 25
-max_intervention_strenght: 45
-num_random_directions: 3
+prompt: "a building in a stunning landscape in the style of a famous artist"
+target_tokens: ["in", "the", "style", "of", "a", "famous", "artist"]
+min_intervention_strenght: 8
+max_intervention_strenght: 8
+num_random_directions: 2
 
-batch_size: 4
-num_samples: 20
+batch_size: 9
+num_samples: 12006
 directions_path: "../universal-diffsae/sae-ckpts/monster-k32-exp-factor-8_grads"
 direction_type: "sae"
 

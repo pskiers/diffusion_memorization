@@ -2,7 +2,7 @@ defaults:
   - _self_
 
 out_dir: ./outputs
-name: sdxl-art-pca
+name: sdxl-40-art-pca
 seed: 0
 
 lora_path: null # ../diffusers/examples/dreambooth/lora-trained-xl-prior_preservation/pytorch_lora_weights.safetensors
@@ -44,7 +44,7 @@ data:
   prompt: "artwork in the style of a famous artist"
   target_tokens: ["artwork", "in", "the", "style", "of", "a", "famous", "artist"]
   timesteps: [50]
-  image_folder: /net/scratch/hscra/plgrid/plgpawel269/LID-project/data/sdxl_subspace_tokens/frog
+  image_folder: /net/scratch/hscra/plgrid/ekaczmarczyk/LID-project/data/sdxl_subspace_tokens/frog
 
 method: "latent"
 remove_common: true

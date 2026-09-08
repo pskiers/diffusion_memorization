@@ -13,7 +13,7 @@ from huggingface_hub import hf_hub_download
 from optim_utils import *
 from compare_subspaces import load_grads, load_sae_directions, sample_sum_normalize
 from multi_token_subspace import SubspaceGetter
-
+from PIL import Image
 
 class SamplerWithMultiDirections:
     def __init__(self, cfg):
@@ -119,7 +119,7 @@ class SamplerWithMultiDirections:
         
         if self.direction_type == "grad":
             grads = load_grads(self.directions_path)
-            threshold = 2.5 / 2048  # NOTE hardcoded for sdxl, change?
+            threshold = 2.5 / 2048  * n_tokens # NOTE hardcoded for sdxl, change?
             directions = SubspaceGetter.find_significant_directions(
                 grads, significance_threshold=threshold
             )[0]
@@ -130,17 +130,23 @@ class SamplerWithMultiDirections:
         else:
             raise ValueError(self.direction_type)
 
-        set_random_seed(self.seed)
+        #set_random_seed(self.seed)
         os.makedirs(self.outpath, exist_ok=True)
 
         for i in tqdm(range(self.num_samples // self.batch_size)):
+            
+            current_iteration_seed = self.seed + i
+            set_random_seed(current_iteration_seed)
+            
             if type(self.num_random_directions) == str:
                 min_directions, max_directions = map(int, self.num_random_directions.split("-"))
                 curr_num_random_directions = torch.randint(min_directions, max_directions + 1, (1,)).item()
-                batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=curr_num_random_directions)
+                #batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=curr_num_random_directions)
+                batch_directions = sample_sum_normalize(directions, k=1, n=curr_num_random_directions).repeat(self.batch_size, 1)
             else:
-                batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=self.num_random_directions)
-            
+                #batch_directions = sample_sum_normalize(directions, k=self.batch_size, n=self.num_random_directions)
+                batch_directions = sample_sum_normalize(directions, k=1, n=self.num_random_directions).repeat(self.batch_size, 1)
+                
             batch_directions = batch_directions * n_tokens
             batch_intervention_strenghts = torch.empty(self.batch_size).uniform_(self.low, self.high)
             prompt_outputs = self.pipe.encode_prompt(self.prompt)
@@ -150,10 +156,10 @@ class SamplerWithMultiDirections:
             indices = self.get_tokens_pos(self.prompt, self.target_tokens) 
             batch_embeds = prompt_embeds.repeat(self.batch_size, 1, 1) 
 
-            for i in range(self.batch_size):
-                strength = batch_intervention_strenghts[i]
+            for b in range(self.batch_size):
+                strength = batch_intervention_strenghts[b]
                 for j, pos in enumerate(indices):
-                    batch_embeds[i, pos] += strength * directions_reshaped[i, j]
+                    batch_embeds[b, pos] += strength * directions_reshaped[b, j]
 
             images = self.pipe(
                 prompt_embeds=batch_embeds,
@@ -161,11 +167,22 @@ class SamplerWithMultiDirections:
                 num_images_per_prompt=1,
                 **self.kwargs
             ).images
+            
+            #grid = self.make_grid(images, rows=3, cols=3)
+            #grid.save(os.path.join(self.outpath, f"grid_{i:04d}.png"))
+            
             gc.collect()
             torch.cuda.empty_cache()
+            
             for j, img in enumerate(images):
-                img.save(os.path.join(self.outpath, f"{i * self.batch_size + j}.png"))
-
+               img.save(os.path.join(self.outpath, f"{i * self.batch_size + j}.png"))
+            
+    def make_grid(self, imgs, rows, cols):
+        w, h = imgs[0].size
+        grid = Image.new('RGB', size=(cols*w, rows*h))
+        for i, img in enumerate(imgs):
+            grid.paste(img, box=(i%cols*w, i//cols*h))
+        return grid
 
 @hydra.main(version_base=None, config_path="configs", config_name="sample_with_multi_directions")
 def main(cfg: DictConfig):
